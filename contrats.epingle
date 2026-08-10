@@ -1,0 +1,18 @@
+# Épingle du contrat du plan de contrôle
+#
+# Ce dépôt consomme l'OpenAPI des six API depuis `smartbureau-server`.
+# L'épingle est un CONDENSAT DE COMMIT, jamais une branche : le contrat
+# ne bouge pas sous les pieds de ce dépôt sans qu'un commit d'ici le
+# décide (contrats/README.md §3.2 de smartbureau-server).
+#
+# Adopter une nouvelle version du contrat = modifier ce fichier, dans un
+# commit dédié qui cite ce qui change (ex. « contrat: adopter <sha>
+# (annexe 1 §4.4) »).
+#
+# Récupération :
+#   outillage/recuperer-contrat.sh    (refuse de continuer si le condensat
+#                                      récupéré diverge de celui-ci)
+
+depot=https://github.com/consultom-dev/smartbureau-server.git
+commit=a968541b59eb82703eb666aea32c14859c6b04cf
+fichier=contrats/openapi.yaml

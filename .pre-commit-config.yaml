@@ -1,0 +1,43 @@
+# =============================================================================
+# Modèle de `.pre-commit-config.yaml` pour un dépôt de rôle
+# (`smartbureau-edge`, `-gateway`, `-factory`, `-image-systeme`).
+#
+# À copier À LA RACINE du dépôt sous le nom `.pre-commit-config.yaml`,
+# puis :
+#     pip install pre-commit
+#     pre-commit install --hook-type pre-commit --hook-type pre-push
+#
+# `rev` s'épingle par CONDENSAT DE COMMIT, jamais par branche : le lint est
+# un contrat, il ne bouge pas sous les pieds d'un dépôt sans que celui-ci
+# le décide. Même discipline que l'épinglage du contrat OpenAPI (CLAUDE.md
+# de `smartbureau-server`), même raison que « aucun tag mobile »
+# (annexe 7 §8, invariant 1).
+#
+# Pour monter de version :
+#     pre-commit autoupdate --repo https://github.com/consultom-dev/smartbureau-server
+# puis relire ce que le nouveau lint refuse — un contrôle ajouté est une
+# règle du corpus devenue vérifiable, pas une contrariété.
+# =============================================================================
+
+repos:
+  - repo: https://github.com/consultom-dev/smartbureau-server
+    rev: a968541b59eb82703eb666aea32c14859c6b04cf   # ← condensat à poser
+    hooks:
+      - id: lint-smartbureau
+        stages: [pre-commit]
+      - id: lint-smartbureau-complet
+        entry: outillage/lint/lint.sh --strict
+        stages: [pre-push]
+
+  # ---------------------------------------------------------------------
+  # Hygiène générique — utile partout, et sans rapport avec le corpus.
+  # Facultatif : à retirer si le dépôt ne veut qu'un seul outillage.
+  # ---------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]

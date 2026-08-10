@@ -15,3 +15,6 @@
 # Wildcard *.gateway tiré de Vault, re-tiré à chaque renouvellement
 # (640 root:smartbureau-lecture — annexe 3, invariant 10)
 /tls/
+
+# contrat récupéré par outillage/recuperer-contrat.sh (non versionné : l'épingle fait foi)
+.contrat/
