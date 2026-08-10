@@ -1,0 +1,17 @@
+# Répertoires et fichiers d'EXÉCUTION de la passerelle — jamais versionnés.
+# Justification complète : docs/arborescences.md §8 (smartbureau-server).
+
+# Valeurs propres à un nœud (GW_ID, secret d'agent) ; seul .env.example
+# est suivi
+.env
+.env.*
+!.env.example
+
+# Clés WireGuard : la clé PARTAGÉE wg-kits tirée de Vault (600 root) et la
+# paire wg-core générée localement (annexe 3 §2.4). Le secret le plus
+# large du système : il vaut pour les N passerelles.
+/wg/
+
+# Wildcard *.gateway tiré de Vault, re-tiré à chaque renouvellement
+# (640 root:smartbureau-lecture — annexe 3, invariant 10)
+/tls/
