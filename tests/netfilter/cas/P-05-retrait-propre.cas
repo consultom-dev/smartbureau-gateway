@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# cas/P-05-retrait-propre.cas
+#
+# À l'arrêt, la passerelle retire SES règles — et rien d'autre. Deux
+# propriétés opposées, qui se tiennent :
+#
+#   - elle ne laisse pas de règle orpheline référençant des interfaces
+#     disparues (le prochain démarrage ne les reconnaîtrait pas) ;
+#   - elle NE DÉTRUIT PAS l'ipset, qui porte l'autorisation internet de
+#     toute la flotte servie. La vider ferait payer un `compose restart`
+#     à 10 000 kits, le temps que l'agent de passerelle repasse.
+
+set -euo pipefail
+. "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
+
+cas "P-05" "Le retrait enlève les règles, conserve l'ipset, et se rejoue" \
+    --source "annexe 3 §3.2 (trap de retrait) ; annexe 3 §8 invariant 1" \
+    --lot 4
+
+preparer() {
+  banc_creer p05
+  banc_role passerelle
+}
+
+agir() {
+  env_config IFACES_PUBLIQUES=eth0
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  dans_sut ipset add internet_ok 10.200.0.5 -exist
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh" --oter
+}
+
+verifier() {
+  [ "$CODE" -eq 0 ] || echec "le retrait a rendu $CODE : $ERREUR"
+
+  regle_absente filter FORWARD -i wg-kits -o wg-kits -j DROP
+  regle_absente filter FORWARD -i wg-kits -o wg-core -j ACCEPT
+  regle_absente filter FORWARD -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  regle_absente filter INPUT   -i wg-kits -j REJECT
+  regle_absente nat POSTROUTING -o wg-core -j MASQUERADE
+  regle_absente nat POSTROUTING -s 10.200.0.0/16 -o eth0 -j MASQUERADE
+  nombre_de_regles_est filter FORWARD 0 'wg-'
+
+  # L'ipset et son contenu survivent.
+  ipset_existe internet_ok
+  ipset_contient internet_ok 10.200.0.5
+
+  # Le retrait est idempotent : le rejouer ne rend pas d'erreur.
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh" --oter
+  [ "$CODE" -eq 0 ] || echec "le second retrait a rendu $CODE : $ERREUR"
+
+  # Et la pose suivante retrouve exactement l'état nominal, l'ipset comprise.
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  regle_en_position filter FORWARD derniere -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  ipset_contient internet_ok 10.200.0.5
+}
+
+fin_cas

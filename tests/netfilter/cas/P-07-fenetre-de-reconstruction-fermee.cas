@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# cas/P-07-fenetre-de-reconstruction-fermee.cas
+#
+# Reposer la séquence entière (P-02) suppose de la DÉMONTER d'abord. Entre
+# le `-D` et le `-A`, `FORWARD` n'a plus une seule règle `wg-kits` : ni le
+# DROP kit → kit, ni le fourre-tout. Si la politique de la chaîne est
+# `ACCEPT` — c'est le cas par défaut — la passerelle relaie 10 000 kits les
+# uns vers les autres pendant cette fenêtre. Toutes les 30 s, à chaque tour
+# qui trouve quelque chose à réparer.
+#
+# D'où le DROP de BARRAGE, posé en tête AVANT le démontage. La fenêtre
+# existe toujours ; elle est FERMÉE au lieu d'être ouverte.
+#
+# Ce cas la prend sur le fait, en faisant échouer la reconstruction au
+# milieu : une interface au nom trop long pour netfilter (IFNAMSIZ), et le
+# `-A` de la deuxième règle est refusé. Le script doit alors LAISSER le
+# barrage et rendre un code non nul — un script mort en pleine
+# reconstruction coupe les kits, il ne les relaie pas.
+
+set -euo pipefail
+. "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
+
+cas "P-07" "Reconstruction interrompue : la fenêtre est fermée, pas ouverte" \
+    --source "annexe 3 §3.2 (réaffirmation) ; annexe 3 §8 invariant 2 ; arbitrage Q8" \
+    --lot 4
+
+preparer() {
+  banc_creer p07
+  banc_role passerelle
+}
+
+# Un observateur interposé dans le PATH : il PHOTOGRAPHIE la chaîne avant
+# chaque appel `iptables` du script, puis passe la main au vrai binaire.
+# Sans cela, le cas ne verrait que l'état FINAL — et déplacer
+# `barrage_poser` APRÈS le démontage (donc ouvrir la fenêtre en grand)
+# laisserait le banc entièrement vert.
+OBS="$(mktemp -d)"
+PHOTOS="$OBS/photos.txt"
+
+preparer_observateur() {
+  cat > "$OBS/iptables" <<'OBSERVATEUR'
+#!/bin/sh
+/usr/sbin/iptables -w 5 -S FORWARD 2>/dev/null | tr '\n' '|' >> "$PHOTOS"
+printf '\n' >> "$PHOTOS"
+exec /usr/sbin/iptables "$@"
+OBSERVATEUR
+  chmod +x "$OBS/iptables"
+}
+
+agir() {
+  preparer_observateur
+  env_config IFACES_PUBLIQUES=eth0
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+}
+
+verifier() {
+  [ "$CODE" -eq 0 ] || echec "la pose initiale a rendu $CODE : $ERREUR"
+  regle_absente filter FORWARD -i wg-kits -j DROP     # pas de barrage résiduel
+
+  # Une passerelle nominale, puis une reconstruction qui casse en route :
+  # IFACE_CORE porte un nom de 20 caractères, que netfilter refuse
+  # (IFNAMSIZ = 16). La règle 1 passe, la règle 2 est rejetée.
+  env_purger
+  env_config IFACES_PUBLIQUES=eth0 IFACE_CORE=wg-core-beaucoup-trop-long
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+
+  [ "$CODE" -ne 0 ] || echec "la reconstruction a échoué et le script a pourtant rendu 0"
+  case "$ERREUR" in
+    *"barrage"*) _ok "l'échec de reconstruction est journalisé, et il nomme le barrage" ;;
+    *) _ko "rien dans le journal ne dit que le barrage reste" "$ERREUR" ;;
+  esac
+
+  # LE POINT DU CAS : le barrage est là, EN TÊTE, et il avale le trafic des
+  # kits. C'est la version fermée de la panne — l'inverse serait un FORWARD
+  # sans une seule règle wg-kits, donc un relais ouvert entre kits.
+  regle_presente filter FORWARD -i wg-kits -j DROP
+  regle_en_position filter FORWARD 1 -i wg-kits -j DROP
+
+  # Et la réparation se fait toute seule : l'environnement redevenu sain,
+  # le tour suivant reconstruit et retire le barrage.
+  env_purger
+  env_config IFACES_PUBLIQUES=eth0
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  [ "$CODE" -eq 0 ] || echec "le tour de réparation a rendu $CODE : $ERREUR"
+
+  regle_absente  filter FORWARD -i wg-kits -j DROP
+  regle_presente filter FORWARD -i wg-kits -o wg-kits -j DROP
+  regle_presente filter FORWARD -i wg-kits -o wg-core -j ACCEPT
+  regle_en_position filter FORWARD derniere \
+    -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  nombre_de_regles_est filter FORWARD 6 'wg-'
+
+  # --- LA FENÊTRE ELLE-MÊME, observée pendant qu'elle est ouverte ----------
+  # Une règle est effacée, la reconstruction démonte puis repose. À AUCUN
+  # instant `FORWARD` ne doit être sans une règle qui arrête les kits :
+  # entre le `-D` et le `-A`, la politique de chaîne est `ACCEPT` et la
+  # passerelle relaierait 10 000 kits les uns vers les autres. C'est la
+  # raison d'être du barrage, et elle ne se voit QUE pendant la fenêtre —
+  # l'état final est identique avec ou sans lui.
+  : > "$PHOTOS"
+  ipt -t filter -D FORWARD -i wg-kits -o wg-core -j ACCEPT
+  env_purger
+  env_config IFACES_PUBLIQUES=eth0 PATH="$OBS:$PATH" PHOTOS="$PHOTOS"
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  [ "$CODE" -eq 0 ] || echec "la reconstruction observée a rendu $CODE : $ERREUR"
+
+  nues="$(grep -c -v -e 'wg-kits' "$PHOTOS" || true)"
+  [ "$(wc -l < "$PHOTOS")" -gt 3 ] \
+    || echec "l'observateur n'a photographié que $(wc -l < "$PHOTOS") état(s) — le PATH n'a pas été pris"
+  if [ "$nues" -eq 0 ]; then
+    _ok "$(wc -l < "$PHOTOS") états observés pendant la reconstruction, AUCUN sans règle wg-kits — la fenêtre reste fermée"
+  else
+    _ko "$nues état(s) de FORWARD sans une seule règle wg-kits pendant la reconstruction" \
+        "les kits se relaieraient entre eux pendant cette fenêtre, toutes les 30 s"
+  fi
+}
+
+fin_cas

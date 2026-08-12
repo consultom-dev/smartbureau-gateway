@@ -106,13 +106,15 @@ fi
 # =============================================================================
 cas "R-03 — rôle passerelle : wg-kits (51820) et wg-core montent (annexe 3 §3.2)"
 mkdir -p "$BAC/passerelle"
+# VAULT LIVRE UNE CLÉ, PAS UNE CONFIGURATION (annexe 3 §2.4, arbitrage
+# Q12). On dépose donc exactement ce que le provisionnement dépose — la
+# clé, et rien d'autre — et c'est au rôle de rendre `wg-kits.conf`.
+# Écrire la conf ici masquerait le trou : sur un nœud réel, personne ne
+# l'écrirait, `wg-quick` n'aurait pas de fichier, et AUCUNE passerelle ne
+# monterait jamais.
 kits_sk=$(genkey)
-cat > "$BAC/passerelle/wg-kits.conf" <<CONF
-[Interface]
-Address = 10.200.0.0/16
-ListenPort = 51820
-PrivateKey = $kits_sk
-CONF
+printf '%s\n' "$kits_sk" > "$BAC/passerelle/wg-kits.key"
+chmod 600 "$BAC/passerelle/wg-kits.key"
 srv_sk=$(genkey); srv_pk=$(pubkey "$srv_sk")
 lancer wg-gw passerelle -v "$BAC/passerelle:/etc/wireguard" \
   -e WG_CORE_ADRESSE=10.100.0.2/32 \
@@ -122,6 +124,15 @@ if attendre_iface wg-gw wg-kits && attendre_iface wg-gw wg-core; then
   ok "wg-kits et wg-core montées"
   kp=$(dans wg-gw "wg show wg-kits listen-port")
   [ "$kp" = "51820" ] && ok "wg-kits écoute 51820" || ko "R-03" "port kits=$kp"
+  dans wg-gw "test -f /etc/wireguard/wg-kits.conf" \
+    && ok "wg-kits.conf RENDU depuis la seule clé tirée de Vault (arbitrage Q12)" \
+    || ko "R-03" "wg-kits.conf jamais rendue — personne ne l'écrit, aucune passerelle ne monte"
+  # `Table = off` va avec `Address = 10.200.0.0/16` : sans lui, wg-quick
+  # poserait une route /16 vers wg-kits, alors que les /32 des kits
+  # arrivent avec leurs peers (piège 11).
+  dans wg-gw "grep -q '^Table *= *off' /etc/wireguard/wg-kits.conf" \
+    && ok "et elle porte Table = off (piège 11)" \
+    || ko "R-03" "wg-kits.conf sans Table = off"
   dans wg-gw "test -f /etc/wireguard/wg-core.pub" \
     && ok "paire wg-core née localement, publique écrite (annexe 3 §2.4/§6.1)" \
     || ko "R-03" "wg-core.pub absente"

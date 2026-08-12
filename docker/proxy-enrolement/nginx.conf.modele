@@ -1,0 +1,87 @@
+# =============================================================================
+# Le PROXY D'ENRÔLEMENT (annexe 3 §5) — modèle rendu au démarrage.
+#
+# DEUX ROUTES, ET RIEN D'AUTRE. C'est l'invariant 9, et il se lit ici en
+# entier : `POST /enroler` et `GET /config-kit`, tout le reste en 404. Pas
+# de troisième route ACME — le certificat vient de Vault (§2.4), aucun
+# challenge ne s'exécute ici, et le port 80 n'est pas ouvert.
+#
+# IL NE DÉPEND PAS DES TUNNELS pour exister : il sert précisément les kits
+# qui n'en ont pas — un kit neuf, un kit suspendu. Il traduit vers
+# `api.<domaine>` DERRIÈRE wg-core, donc il a besoin que wg-core vive pour
+# RELAYER ; mais il démarre, écoute et répond sans lui, et un kit qui le
+# joint pendant une panne de wg-core reçoit un 502, pas un silence.
+#
+# Le nom `api.` n'a AUCUN enregistrement public (invariant 3) : il est
+# résolu par l'`extra_hosts` du compose, sur ce conteneur comme sur
+# l'agent de passerelle. Sans cette ligne, la passerelle naît muette.
+# =============================================================================
+worker_processes 1;
+events { worker_connections 1024; }
+
+http {
+  access_log /dev/stdout combined;
+  error_log  /dev/stderr warn;
+
+  # La seule exposition publique du nœud n'annonce pas sa version : elle
+  # dirait à qui scanne quelle CVE essayer (arch. §11.2).
+  server_tokens off;
+
+  # AUCUNE journalisation de corps : les secrets d'usine et les secrets
+  # d'API y transitent (annexe 3 §5, arch. §11.2).
+  client_body_buffer_size 32k;
+  client_max_body_size    32k;   # la borne de 32 Ko porte sur les REQUÊTES
+                                 # (arbitrage A8) — un 413 est un code de
+                                 # requête, et les réponses ne sont pas bornées
+
+  # LIMITATION DE DÉBIT. L'enrôlement est rare et le re-poll est lent :
+  # ~0,5 req/s pour toute la flotte à 6 h d'intervalle. Tout dépassement
+  # franc est un SIGNAL, pas une charge — d'où des bornes basses assumées.
+  limit_req_zone  $binary_remote_addr zone=par_ip:10m rate=6r/m;
+  limit_req_zone  $server_name        zone=globale:10m rate=30r/s;
+  limit_req_status 429;
+  limit_conn_zone $binary_remote_addr zone=conn_par_ip:10m;
+
+  upstream plan_de_controle { server API_HOTE:443; keepalive 8; }
+
+  server {
+    # `http2` EN PARAMÈTRE DE `listen`, et pas la directive `http2 on;` :
+    # celle-ci n'existe qu'à partir de nginx 1.25.1, et la base Debian 12
+    # épinglée sert 1.22.1 — `unknown directive "http2"`, nginx refuse de
+    # démarrer, et la passerelle n'a plus d'enrôlement du tout.
+    listen 443 ssl http2;
+    server_name NOM_PUBLIC;
+
+    # Wildcard *.gateway.<domaine>.tld tiré de Vault (§2.4), PARTAGÉ par les
+    # N passerelles — même régime que la clé WireGuard partagée. Il se
+    # re-tire à chaque renouvellement : l'oublier ferme l'enrôlement ET le
+    # re-poll de toute la flotte servie (invariant 10).
+    ssl_certificate     /etc/proxy/tls/gateway.crt;
+    ssl_certificate_key /etc/proxy/tls/gateway.key;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_session_cache   shared:SSL:4m;
+
+    limit_conn conn_par_ip 8;
+
+    location = /enroler {
+      limit_except POST { deny all; }
+      limit_req zone=par_ip burst=3 nodelay;
+      limit_req zone=globale burst=100;
+      proxy_pass https://plan_de_controle/enroler;
+      include /etc/nginx/relais.conf;
+    }
+
+    location = /config-kit {
+      limit_except GET { deny all; }
+      limit_req zone=par_ip burst=3 nodelay;
+      limit_req zone=globale burst=100;
+      proxy_pass https://plan_de_controle/config-kit;
+      include /etc/nginx/relais.conf;
+    }
+
+    # LE RESTE. Pas de `try_files`, pas de page d'erreur bavarde : un 404
+    # sec. Un proxy qui répond autre chose sur un troisième chemin est un
+    # proxy qui a une troisième route (invariant 9).
+    location / { return 404; }
+  }
+}

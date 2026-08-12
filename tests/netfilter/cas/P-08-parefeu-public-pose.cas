@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# cas/P-08-parefeu-public-pose.cas
+#
+# Le pare-feu public du §2.2, POSÉ — pas récité.
+#
+# Ce cas existe parce que la version précédente du script se contentait
+# d'AFFICHER les cinq règles sur la sortie standard, tout en annonçant en
+# en-tête qu'il les posait, et en rendant 0. L'exploitant lançait la
+# procédure documentée, la voyait réussir, et la VM partait en production
+# avec `INPUT` ouvert sur l'interface publique. Aucun test statique ne
+# pouvait le voir : le TEXTE des règles était juste, et c'est tout ce qu'un
+# `grep` regarde.
+#
+# Rien ne rattrape ce pare-feu en aval. Le conteneur `wireguard` ne pose
+# que des règles `-i wg-kits`, et l'invariant 4 dit précisément que les
+# deux pare-feu ne se couvrent pas l'un l'autre.
+
+set -euo pipefail
+. "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
+
+cas "P-08" "Le provisionnement POSE le pare-feu public, il ne l'imprime pas" \
+    --source "annexe 3 §2.2 ; arbitrage Q13" \
+    --lot 4
+
+preparer() {
+  banc_creer p08
+  banc_role passerelle
+}
+
+# UN NETNS N'ISOLE QUE LE RÉSEAU. Sans `UNITE_CIBLE`, ce cas écrirait — et
+# ACTIVERAIT — une unité systemd sur l'HÔTE qui l'exécute, pointant sur le
+# répertoire de travail. Lancer la recette en root sur un poste de
+# développement ou un runner CI y installerait un pare-feu au démarrage.
+UNITE="$(mktemp -d)/unite.service"
+
+agir() {
+  env_config IFACES_PUBLIQUES=eth0 ADMIN_SSH="198.51.100.0/24" UNITE_CIBLE="$UNITE"
+  executer "$SUJET/provisionnement/preparer.sh" parefeu eth0
+}
+
+verifier() {
+  [ "$CODE" -eq 0 ] || echec "la pose du pare-feu a rendu $CODE : $ERREUR"
+
+  # Les trois ports du §2.2, et EUX SEULS.
+  regle_presente filter INPUT -i eth0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  regle_presente filter INPUT -i eth0 -p udp --dport 51820 -j ACCEPT
+  regle_presente filter INPUT -i eth0 -p tcp --dport 443 -j ACCEPT
+
+  # 22/tcp est « administration SEULE » (§2.2), par opposition explicite à
+  # « toute l'Internet » des deux autres. Une règle sans `-s` exposerait
+  # SSH à l'Internet sur chaque passerelle provisionnée.
+  regle_presente filter INPUT -i eth0 -p tcp -s 198.51.100.0/24 --dport 22 -j ACCEPT
+  regle_absente  filter INPUT -i eth0 -p tcp --dport 22 -j ACCEPT
+
+  # « tout le reste : fermé », et EN DERNIER — devant les ACCEPT, elle
+  # fermerait aussi 51820 et 443, et la passerelle ne servirait personne.
+  # DERNIÈRE, et pas seulement « présente » : contrôler l'ordre de deux
+  # règles sur cinq laisse passer un `--dport 22` ou un `conntrack` glissé
+  # DERRIÈRE le DROP — administration coupée dans un cas, tous les retours
+  # du trafic sortant de l'hôte (tirage d'images, NTP) jetés dans l'autre.
+  regle_presente    filter INPUT -i eth0 -j DROP
+  regle_en_position filter INPUT derniere -i eth0 -j DROP
+
+  # Le port 80 n'est PAS ouvert : le certificat vient de Vault, aucun
+  # challenge ACME ne s'exécute ici (§5, invariant 10).
+  regle_absente filter INPUT -i eth0 -p tcp --dport 80 -j ACCEPT
+
+  # Idempotent : le rejouer ne double rien — c'est ce qui permet à l'unité
+  # systemd de le repasser à chaque démarrage.
+  executer "$SUJET/provisionnement/preparer.sh" parefeu eth0
+  [ "$CODE" -eq 0 ] || echec "la seconde pose a rendu $CODE : $ERREUR"
+  proprietaire_unique filter INPUT 'eth0 -j DROP'
+  proprietaire_unique filter INPUT 'dport 51820'
+  nombre_de_regles_est filter INPUT 5 'eth0'
+
+  # --- Une règle effacée revient À SA PLACE, pas en queue ------------------
+  # Même panne qu'au §3.2, et le même correctif : remettre en queue le seul
+  # port manquant le placerait DERRIÈRE le fourre-tout — présent, compté,
+  # vérifiable, et mort. Le jour où §6.4 ouvre 51830 pour wg-kits2, rejouer
+  # ce script sur les nœuds déjà provisionnés produirait exactement cela.
+  ipt -t filter -D INPUT -i eth0 -p udp --dport 51820 -j ACCEPT
+  executer "$SUJET/provisionnement/preparer.sh" parefeu eth0
+  [ "$CODE" -eq 0 ] || echec "la repose a rendu $CODE : $ERREUR"
+  regle_presente    filter INPUT -i eth0 -p udp --dport 51820 -j ACCEPT
+  regle_en_position filter INPUT derniere -i eth0 -j DROP
+  regle_avant filter INPUT \
+    -i eth0 -p udp --dport 51820 -j ACCEPT \
+    -- -i eth0 -j DROP
+  nombre_de_regles_est filter INPUT 5 'eth0'
+
+  # --- Sans plage d'administration, il REFUSE ------------------------------
+  # « Ouvrir 22 à l'Internet en attendant » est un provisoire qui survit à
+  # la mise en production.
+  env_purger
+  env_config IFACES_PUBLIQUES=eth0 UNITE_CIBLE="$UNITE"
+  executer "$SUJET/provisionnement/preparer.sh" parefeu eth0
+  [ "$CODE" -ne 0 ] || echec "ADMIN_SSH absent, et la pose a pourtant réussi"
+  case "$ERREUR" in
+    *ADMIN_SSH*) _ok "sans ADMIN_SSH, la pose REFUSE et le dit" ;;
+    *) _ko "le refus ne nomme pas ADMIN_SSH" "$ERREUR" ;;
+  esac
+
+  # --- Et l'unité de persistance porte la liste ENTIÈRE --------------------
+  # `Environment=IFACES_PUBLIQUES=eth0 eth1` non quoté fait ignorer `eth1`
+  # (« Invalid environment assignment ») : au premier redémarrage, la
+  # seconde interface publique repart GRANDE OUVERTE — la panne de Q13,
+  # différée d'un reboot. Et comme la pose réécrit l'unité, un exploitant
+  # qui ajoute les guillemets à la main les voit disparaître au boot
+  # suivant.
+  if [ -f "$UNITE" ]; then
+    if grep -q 'Environment="IFACES_PUBLIQUES=' "$UNITE"; then
+      _ok "l'unité de persistance quote la liste d'interfaces"
+    else
+      _ko "l'unité ne quote pas IFACES_PUBLIQUES" "$(cat "$UNITE")"
+    fi
+  else
+    _ok "pas d'unité écrite (systemd absent du banc) — la persistance n'est pas testable ici"
+  fi
+}
+
+fin_cas
