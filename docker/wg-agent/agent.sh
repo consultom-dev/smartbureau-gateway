@@ -189,8 +189,16 @@ appliquer_ipset() {
     > "$BAC/internet.brut" \
     || { journal "table servie illisible — l'ipset n'est PAS touchée"; return 1; }
   sed 's,/.*,,' < "$BAC/internet.brut" | sort -u > "$BAC/internet-servis"
-  ipset list "$IPSET_INTERNET" | awk '/^[0-9]+\./ {print $1}' \
-    | sort -u > "$BAC/internet-poses"
+  # `ipset` hors tête de tube, comme `jq` et `wg` : son échec en tête serait
+  # avalé, `internet-poses` serait vide, et le calcul des retraits porterait
+  # sur un ensemble qu'on croit vide. La direction est fail-safe ici (rien
+  # ne serait retiré à tort), mais une propriété qui tient par accident ne
+  # tient pas.
+  ipset list "$IPSET_INTERNET" > "$BAC/ipset.brut" 2>/dev/null || {
+    journal "ipset $IPSET_INTERNET illisible — elle n'est PAS touchée"
+    return 1
+  }
+  awk '/^[0-9]+\./ {print $1}' < "$BAC/ipset.brut" | sort -u > "$BAC/internet-poses"
 
   comm -13 "$BAC/internet-poses" "$BAC/internet-servis" > "$BAC/ipset-a-ajouter"
   comm -23 "$BAC/internet-poses" "$BAC/internet-servis" > "$BAC/ipset-a-retirer"
@@ -250,8 +258,9 @@ remonter_etat() {
     _envoyes=$((_envoyes + LOT_ETAT))
     _lot=$((_lot + 1))
   done
-  [ "$_total" -gt "$LOT_ETAT" ] \
-    && journal "delta de $_total lignes envoyé en $((_lot - 1)) requêtes (fractionné, arbitrage A8)"
+  if [ "$_total" -gt "$LOT_ETAT" ]; then
+    journal "delta de $_total lignes envoyé en $((_lot - 1)) requêtes (fractionné, arbitrage A8)"
+  fi
   # Mémorisé SEULEMENT après succès complet.
   cp "$BAC/handshakes" "$_vu"
   return 0

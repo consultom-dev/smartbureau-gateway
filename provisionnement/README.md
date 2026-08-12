@@ -26,6 +26,33 @@ WireGuard chargé et persisté, Docker CE + compose v2.
 **Rien n'est ouvert vers wg-core** : c'est la passerelle qui initie ce
 tunnel vers le serveur (51821/udp sortant).
 
+**Ce script POSE cette table, il ne l'imprime pas** (arbitrage Q13), et
+rien ne le rattrape en aval — le conteneur `wireguard` ne pose que des
+règles `-i wg-kits`, et l'invariant 4 dit que les deux pare-feu ne se
+couvrent pas l'un l'autre. Trois conséquences pratiques :
+
+- **`ADMIN_SSH` est obligatoire.** « Administration seule » est une
+  SOURCE : une liste de CIDR, séparés par des espaces. Sans elle, la pose
+  refuse — ouvrir 22 à l'Internet « en attendant » est un provisoire qui
+  survit à la mise en production.
+- **La pose rend l'ordre**, pas seulement les règles : le fourre-tout doit
+  rester dernier, sinon les ouvertures ne servent à rien. Une règle
+  manquante fait reposer la séquence entière, sous un barrage.
+- **La persistance est une unité systemd** qui rejoue la pose au
+  démarrage, avant Docker. Elle refait les mêmes vérifications et échoue
+  bruyamment sinon — mais `Before=` ordonne, il n'impose pas : un nœud dont
+  la pose de démarrage échoue démarre quand même. C'est la supervision qui
+  doit le sortir du service.
+
+```bash
+sudo ADMIN_SSH="198.51.100.0/24 203.0.113.7/32" \
+     IFACES_PUBLIQUES=eth0 \
+     GW_ID=gw-01 DOMAINE=… WG_CORE_ADRESSE=… SERVEUR_ENDPOINT=… \
+     SERVEUR_CLE_PUBLIQUE=… AGENT_SECRET=… \
+     . /chemin/vers/release.env \
+     ./provisionnement/preparer.sh tout
+```
+
 ## 3. Secrets et identité
 
 Tirage de Vault avec un **jeton court** (chemin froid) : la clé privée

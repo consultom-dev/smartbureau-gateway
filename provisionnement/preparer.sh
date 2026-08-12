@@ -91,11 +91,16 @@ poser_sysctls() {
 # localement, et dockerd garde ses propres chaînes. Poser `-P INPUT DROP`
 # à la place couperait des chemins que ce script ne connaît pas.
 parefeu_regles() {   # émet « spécification… », une par ligne, DANS L'ORDRE
-  local pub="$1"
+  local pub="$1" src
   printf '%s\n' "-i $pub -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
-  printf '%s\n' "-i $pub -p udp --dport 51820 -j ACCEPT"
+  printf '%s\n' "-i $pub -p udp --dport ${WG_KITS_PORT:-51820} -j ACCEPT"
   printf '%s\n' "-i $pub -p tcp --dport 443 -j ACCEPT"
-  printf '%s\n' "-i $pub -p tcp --dport 22 -j ACCEPT"
+  # 22/tcp est « administration SEULE » dans la table du §2.2, par
+  # opposition explicite à « toute l'Internet » des deux lignes
+  # précédentes. Sans `-s`, chaque passerelle exposerait SSH à l'Internet.
+  for src in ${ADMIN_SSH:-}; do
+    printf '%s\n' "-i $pub -p tcp -s $src --dport 22 -j ACCEPT"
+  done
   printf '%s\n' "-i $pub -j DROP"
 }
 
@@ -105,6 +110,23 @@ parefeu_public() {   # la forme LISIBLE, pour l'inspection et la recette
   parefeu_regles "$pub" | sed 's/^/-A INPUT /'
 }
 
+# La séquence est-elle complète ET dans l'ordre ? Le fourre-tout doit être
+# la DERNIÈRE règle d'INPUT qui parle de cette interface : tout ce qui le
+# suit est inatteignable, et un `-C` ne sait pas le dire.
+parefeu_conforme() {
+  local pub="$1" ligne derniere
+  while read -r ligne; do
+    [ -n "$ligne" ] || continue
+    # shellcheck disable=SC2086
+    $IPT -C INPUT $ligne 2>/dev/null || return 1
+  done < <(parefeu_regles "$pub")
+  derniere="$($IPT -S INPUT 2>/dev/null | grep -e "-i $pub " | tail -n 1)"
+  case "$derniere" in
+    *"-i $pub -j DROP"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 poser_parefeu() {
   local pub_liste="${1:-eth0}" pub ligne
   if [ "$APPLIQUER" = "0" ]; then
@@ -112,26 +134,53 @@ poser_parefeu() {
     for pub in $pub_liste; do parefeu_public "$pub"; done
     return 0
   fi
+  [ -n "${ADMIN_SSH:-}" ] \
+    || echec "ADMIN_SSH non défini — le §2.2 dit « 22/tcp : administration SEULE ». Poser la ou les plages d'administration (CIDR séparés par des espaces) ; ouvrir 22 à l'Internet « en attendant » est un provisoire qui survit à la mise en production"
 
   for pub in $pub_liste; do
-    # `-C` puis `-A` : idempotent, et en QUEUE — le DROP fourre-tout est
-    # écrit en dernier, il doit être évalué en dernier. Même convention que
-    # les règles du conteneur `wireguard` (arbitrage Q8).
+    if parefeu_conforme "$pub"; then
+      journal "pare-feu public déjà conforme sur $pub"
+      continue
+    fi
+    # LA SÉQUENCE ENTIÈRE, comme au §3.2 et pour la même raison : remettre
+    # en queue le seul port manquant le placerait DERRIÈRE le fourre-tout —
+    # présent, compté, vérifiable, et mort. Le jour où §6.4 ouvre 51830
+    # pour wg-kits2, rejouer ce script sur les nœuds déjà provisionnés
+    # produirait exactement cela, sur toute la flotte.
+    #
+    # Barrage d'abord : la fenêtre de reconstruction est FERMÉE. Un script
+    # tué au milieu laisse l'interface publique close, jamais ouverte.
+    $IPT -C INPUT -i "$pub" -j DROP 2>/dev/null \
+      || $IPT -I INPUT 1 -i "$pub" -j DROP \
+      || echec "pare-feu public : barrage impossible à poser sur $pub"
+
     while read -r ligne; do
       [ -n "$ligne" ] || continue
       # shellcheck disable=SC2086
-      $IPT -C INPUT $ligne 2>/dev/null && continue
+      $IPT -D INPUT $ligne 2>/dev/null || true
+    done < <(parefeu_regles "$pub")
+
+    while read -r ligne; do
+      [ -n "$ligne" ] || continue
       # shellcheck disable=SC2086
       $IPT -A INPUT $ligne || echec "pare-feu public : « $ligne » refusée sur $pub"
     done < <(parefeu_regles "$pub")
 
-    # VÉRIFIER APRÈS AVOIR POSÉ. Le fourre-tout est la règle qui ferme ;
-    # s'il manque, tout ce qui écoute sur l'hôte est joignable depuis
-    # l'Internet, et le reste des règles ne sert à rien.
-    # shellcheck disable=SC2086
-    $IPT -C INPUT -i "$pub" -j DROP 2>/dev/null \
-      || echec "pare-feu public : le DROP fourre-tout est absent sur $pub après la pose"
-    journal "pare-feu public posé sur $pub (51820/udp, 443/tcp, 22/tcp ; tout le reste fermé)"
+    # Le barrage posé en tête n'appartient pas à la séquence : la dernière
+    # règle vient d'être posée en queue, celui-ci doit partir.
+    while [ "$($IPT -S INPUT 2>/dev/null | grep -ce "^-A INPUT -i $pub -j DROP$" || true)" -gt 1 ]; do
+      # `-D` retire la PREMIÈRE occurrence : le barrage, jamais le
+      # fourre-tout qui vient d'être reposé en queue.
+      $IPT -D INPUT -i "$pub" -j DROP || echec "pare-feu public : barrage impossible à retirer sur $pub"
+    done
+
+    # VÉRIFIER APRÈS AVOIR POSÉ — présence ET position. Le fourre-tout est
+    # la règle qui ferme ; s'il manque, tout ce qui écoute sur l'hôte est
+    # joignable depuis l'Internet, et s'il n'est pas dernier, ce sont les
+    # ouvertures qui ne servent à rien.
+    parefeu_conforme "$pub" \
+      || echec "pare-feu public : séquence non conforme sur $pub après la pose ($($IPT -S INPUT | grep -e "-i $pub " | tr '\n' '|'))"
+    journal "pare-feu public posé sur $pub (${WG_KITS_PORT:-51820}/udp, 443/tcp ouverts ; 22/tcp depuis $ADMIN_SSH ; tout le reste fermé)"
   done
 
   # v6 EN BLOC. La flotte est v4 seule : une politique v6 en ACCEPT est une
@@ -165,11 +214,18 @@ Description=Pare-feu public de la passerelle SmartBureau (annexe 3 §2.2)
 After=network-pre.target
 Before=docker.service
 Wants=network-pre.target
+ConditionPathExists=$RACINE/provisionnement/preparer.sh
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Environment=IFACES_PUBLIQUES=$pub_liste
+# Les guillemets ne sont PAS décoratifs : sans eux, une liste de deux
+# interfaces perd la seconde (« Invalid environment assignment »), et le
+# nœud repart au boot avec elle GRANDE OUVERTE — la panne de Q13, différée
+# d un redémarrage.
+Environment="IFACES_PUBLIQUES=$pub_liste"
+Environment="ADMIN_SSH=$ADMIN_SSH"
+Environment="WG_KITS_PORT=${WG_KITS_PORT:-51820}"
 ExecStart=$RACINE/provisionnement/preparer.sh parefeu
 
 [Install]
@@ -182,21 +238,28 @@ UNITE
 }
 
 # --- 3. Prérequis ------------------------------------------------------------
-verifier_prerequis() {
-  command -v docker >/dev/null 2>&1 || echec "docker absent"
+verifier_backend() {
   iptables --version 2>/dev/null | grep -q nf_tables \
     || echec "backend netfilter legacy — nf_tables exigé (arch. piège 9)"
+}
 
-  # Les interfaces de sortie publique DOIVENT exister. netfilter accepte un
-  # nom d'interface inexistant sans broncher : les règles seraient posées,
-  # comptées, vérifiables — et jamais atteintes. Sur une VM en `ens3`
-  # provisionnée avec le défaut `eth0`, la sortie internet de toute la
-  # flotte servie serait morte, en silence.
+# Les interfaces de sortie publique DOIVENT exister. netfilter accepte un
+# nom d'interface inexistant sans broncher : les règles seraient posées,
+# comptées, vérifiables — et jamais atteintes. Sur une VM en `ens3`
+# provisionnée avec le défaut `eth0`, la sortie internet de toute la
+# flotte servie serait morte, en silence.
+verifier_interfaces() {
   local pub
   for pub in ${IFACES_PUBLIQUES:-eth0}; do
     ip link show "$pub" >/dev/null 2>&1 \
       || echec "interface de sortie publique « $pub » inexistante — poser IFACES_PUBLIQUES (§7, arbitrage Q10)"
   done
+}
+
+verifier_prerequis() {
+  command -v docker >/dev/null 2>&1 || echec "docker absent"
+  verifier_backend
+  verifier_interfaces
 
   if [ "$APPLIQUER" != "0" ]; then
     modprobe wireguard 2>/dev/null || true
@@ -223,9 +286,16 @@ ecrire_env() {
   # les fixe ; sans lui, ce script écrirait `:dev` sur un nœud de
   # production — un tag mobile, ce que le dépôt interdit. On refuse, à moins
   # que l'exploitant ne le demande explicitement (bancs, maquette).
-  if [ -z "${IMG_WG:-}${IMG_WG_AGENT:-}${IMG_PROXY_ENROLEMENT:-}" ] \
-     && [ "${AUTORISER_IMAGES_DEV:-0}" != "1" ]; then
-    echec "IMG_WG / IMG_WG_AGENT / IMG_PROXY_ENROLEMENT non définis — sourcer le release.env de la release (pas de tag mobile), ou poser AUTORISER_IMAGES_DEV=1 pour une maquette"
+  # LES TROIS SÉPARÉMENT. Une garde sur leur CONCATÉNATION est satisfaite
+  # par une seule : un nœud partirait avec `wg` par condensat et les deux
+  # autres en `:dev`, ce que le dépôt interdit.
+  if [ "${AUTORISER_IMAGES_DEV:-0}" != "1" ]; then
+    local manquantes=""
+    for v in IMG_WG IMG_WG_AGENT IMG_PROXY_ENROLEMENT; do
+      [ -n "${!v:-}" ] || manquantes="$manquantes $v"
+    done
+    [ -z "$manquantes" ] \
+      || echec "images non fixées :$manquantes — sourcer le release.env de la release (pas de tag mobile, §6.1), ou poser AUTORISER_IMAGES_DEV=1 pour une maquette"
   fi
 
   # ÉCRITURE LIGNE À LIGNE, jamais par `sed`. Un secret d'agent contenant
@@ -252,7 +322,15 @@ ecrire_env() {
 
 case "${1:-tout}" in
   sysctls)  sysctls ;;
-  parefeu)  poser_parefeu "${2:-${IFACES_PUBLIQUES:-eth0}}" ;;
+  parefeu)
+    # C'est le SEUL chemin exécuté au démarrage. Il refait donc les mêmes
+    # vérifications que la pose initiale : un backend legacy poserait des
+    # règles muettes (piège 9), et une interface renommée par l'hyperviseur
+    # produirait des règles présentes et jamais atteintes.
+    IFACES_PUBLIQUES="${2:-${IFACES_PUBLIQUES:-eth0}}"
+    verifier_interfaces
+    verifier_backend
+    poser_parefeu "$IFACES_PUBLIQUES" ;;
   montrer-parefeu)
     for _p in ${2:-${IFACES_PUBLIQUES:-eth0}}; do parefeu_public "$_p"; done ;;
   tout)

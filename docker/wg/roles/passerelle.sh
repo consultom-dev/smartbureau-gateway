@@ -20,32 +20,51 @@
 set -eu
 . /usr/local/lib/wg/roles/commun.sh
 
-# Premier démarrage, wg-kits : Vault livre une CLÉ, pas une configuration
-# (annexe 3 §2.4, arbitrage Q12). Celle-ci n'a aucun secret hors la clé et
-# aucune valeur propre au nœud — les N passerelles ont la même — donc elle
-# se rend ici, à partir de `wg-kits.key`. La faire voyager par Vault ferait
-# passer du public par le chemin froid ; la taper sur chaque nœud ferait
-# dépendre 10 000 kits d'un fichier écrit N fois. Sans cette règle, aucune
-# passerelle ne monte : `wg-quick` n'a pas de fichier, et personne n'était
-# chargé de l'écrire.
-if [ ! -f "$WG_CONF/wg-kits.conf" ]; then
-  [ -r "$WG_CONF/wg-kits.key" ] || {
-    journal "wg-kits.conf ET wg-kits.key absents — la clé partagée se tire de Vault au provisionnement (annexe 3 §2.4)"
-    exit 1
-  }
-  umask 077
+# wg-kits : Vault livre une CLÉ, pas une configuration (annexe 3 §2.4,
+# arbitrage Q12). Celle-ci n'a aucun secret hors la clé et aucune valeur
+# propre au nœud — les N passerelles ont la même — donc elle se rend ici.
+# La faire voyager par Vault ferait passer du public par le chemin froid ;
+# la taper sur chaque nœud ferait dépendre 10 000 kits d'un fichier écrit
+# N fois. Sans ce rendu, aucune passerelle ne monte : `wg-quick` n'a pas de
+# fichier, et personne n'était chargé de l'écrire.
+#
+# LA CONF SUIT LA CLÉ — elle n'est pas « rendue une fois ». Un rendu
+# conditionné à la seule ABSENCE du fichier rendrait DÉFINITIVE la première
+# conf produite, fausse comprise : rendue depuis une clé tronquée, elle le
+# resterait après que l'exploitant a corrigé la clé et redémarré, et la
+# réparation demanderait un `rm` qu'aucune procédure ne documente. Et la
+# ROTATION (§2.4, §6.4) « consiste à tirer la version suivante — pas à
+# éditer un fichier » : sans rendu dérivé, le nœud continuerait de servir
+# avec l'ancienne clé, en silence.
+lisible "$WG_CONF/wg-kits.key" || {
+  journal "wg-kits.key absente ou vide — la clé partagée se tire de Vault au provisionnement (annexe 3 §2.4)"
+  exit 1
+}
+cle_kits="$(cat "$WG_CONF/wg-kits.key")"
+cle_posee=""
+[ -f "$WG_CONF/wg-kits.conf" ] \
+  && cle_posee="$(sed -n 's/^ *PrivateKey *= *//p' "$WG_CONF/wg-kits.conf")"
+
+if [ "$cle_kits" != "$cle_posee" ]; then
   # `Table = off` va avec `Address = 10.200.0.0/16` : sans lui, `wg-quick`
   # poserait une route /16 vers wg-kits, alors que les /32 des kits
   # arrivent avec leurs peers (piège 11 de l'architecture).
-  cat > "$WG_CONF/wg-kits.conf" <<CONF
-[Interface]
-Address    = ${WG_KITS_ADRESSE:-10.200.0.0/16}
-ListenPort = ${WG_KITS_PORT:-51820}
-PrivateKey = $(cat "$WG_CONF/wg-kits.key")
-Table      = off
-CONF
-  umask 022
-  journal "wg-kits.conf rendu depuis wg-kits.key (annexe 3 §2.4, arbitrage Q12) — aucun peer : ils arrivent par l'agent de passerelle (§4.1)"
+  #
+  # `poser` : écriture ATOMIQUE, mode avant contenu. Un `cat >` interrompu
+  # laisserait une conf tronquée que le garde « la clé correspond-elle »
+  # relirait comme divergente au tour suivant — mais entre les deux,
+  # `wg-quick` aurait échoué sur un fichier à moitié écrit.
+  printf '[Interface]\nAddress    = %s\nListenPort = %s\nPrivateKey = %s\nTable      = off\n' \
+    "${WG_KITS_ADRESSE:-10.200.0.0/16}" "${WG_KITS_PORT:-51820}" "$cle_kits" \
+    | poser "$WG_CONF/wg-kits.conf" 600 || {
+      journal "wg-kits.conf impossible à écrire"
+      exit 1
+    }
+  if [ -n "$cle_posee" ]; then
+    journal "wg-kits.conf RÉÉCRITE : la clé partagée a changé (rotation, annexe 3 §2.4)"
+  else
+    journal "wg-kits.conf rendue depuis wg-kits.key (arbitrage Q12) — aucun peer : ils arrivent par l'agent de passerelle (§4.1)"
+  fi
 fi
 
 # Premier démarrage : la paire wg-core naît ici, et la conf est rendue

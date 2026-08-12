@@ -29,7 +29,26 @@ preparer() {
   banc_role passerelle
 }
 
+# Un observateur interposé dans le PATH : il PHOTOGRAPHIE la chaîne avant
+# chaque appel `iptables` du script, puis passe la main au vrai binaire.
+# Sans cela, le cas ne verrait que l'état FINAL — et déplacer
+# `barrage_poser` APRÈS le démontage (donc ouvrir la fenêtre en grand)
+# laisserait le banc entièrement vert.
+OBS="$(mktemp -d)"
+PHOTOS="$OBS/photos.txt"
+
+preparer_observateur() {
+  cat > "$OBS/iptables" <<'OBSERVATEUR'
+#!/bin/sh
+/usr/sbin/iptables -w 5 -S FORWARD 2>/dev/null | tr '\n' '|' >> "$PHOTOS"
+printf '\n' >> "$PHOTOS"
+exec /usr/sbin/iptables "$@"
+OBSERVATEUR
+  chmod +x "$OBS/iptables"
+}
+
 agir() {
+  preparer_observateur
   env_config IFACES_PUBLIQUES=eth0
   executer "$SUJET/docker/wg/netfilter-passerelle.sh"
 }
@@ -70,6 +89,30 @@ verifier() {
   regle_en_position filter FORWARD derniere \
     -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
   nombre_de_regles_est filter FORWARD 6 'wg-'
+
+  # --- LA FENÊTRE ELLE-MÊME, observée pendant qu'elle est ouverte ----------
+  # Une règle est effacée, la reconstruction démonte puis repose. À AUCUN
+  # instant `FORWARD` ne doit être sans une règle qui arrête les kits :
+  # entre le `-D` et le `-A`, la politique de chaîne est `ACCEPT` et la
+  # passerelle relaierait 10 000 kits les uns vers les autres. C'est la
+  # raison d'être du barrage, et elle ne se voit QUE pendant la fenêtre —
+  # l'état final est identique avec ou sans lui.
+  : > "$PHOTOS"
+  ipt -t filter -D FORWARD -i wg-kits -o wg-core -j ACCEPT
+  env_purger
+  env_config IFACES_PUBLIQUES=eth0 PATH="$OBS:$PATH" PHOTOS="$PHOTOS"
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  [ "$CODE" -eq 0 ] || echec "la reconstruction observée a rendu $CODE : $ERREUR"
+
+  nues="$(grep -c -v -e 'wg-kits' "$PHOTOS" || true)"
+  [ "$(wc -l < "$PHOTOS")" -gt 3 ] \
+    || echec "l'observateur n'a photographié que $(wc -l < "$PHOTOS") état(s) — le PATH n'a pas été pris"
+  if [ "$nues" -eq 0 ]; then
+    _ok "$(wc -l < "$PHOTOS") états observés pendant la reconstruction, AUCUN sans règle wg-kits — la fenêtre reste fermée"
+  else
+    _ko "$nues état(s) de FORWARD sans une seule règle wg-kits pendant la reconstruction" \
+        "les kits se relaieraient entre eux pendant cette fenêtre, toutes les 30 s"
+  fi
 }
 
 fin_cas

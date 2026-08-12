@@ -16,6 +16,7 @@
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -187,17 +188,52 @@ try:
     r.verifier("gateway.crt" in ENTREE_PROXY and "gateway.key" in ENTREE_PROXY,
                "l'entrypoint vérifie les deux fichiers")
     # « un `exit 1` quelque part » ne prouve rien : il faut que le REFUS
-    # soit attaché au CONTRÔLE des deux fichiers. On exécute donc
-    # l'entrypoint sans eux, et on regarde ce qu'il fait.
-    r.verifier(subprocess.run(
-        ["sh", os.path.join(RACINE, "docker", "proxy-enrolement", "entrypoint.sh")],
-        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-             "NOM": "gw-01.gateway.test", "API": "https://api.server.test",
-             "TLS": os.path.join(tempfile.mkdtemp(), "vide")},
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30).returncode != 0,
-        "et REFUSE de démarrer s'ils manquent — un proxy qui écoute "
-        "sans pouvoir servir ferme l'enrôlement ET le re-poll de toute "
-        "la flotte servie, en ayant l'air vivant")
+    # soit attaché au CONTRÔLE des deux fichiers. On EXÉCUTE donc
+    # l'entrypoint, deux fois, et on CONTRASTE — sans quoi le cas
+    # confondrait « refuse à cause du certificat » avec « plante pour une
+    # raison sans rapport », ce qui est arrivé : le banc passait `TLS` là où
+    # le script lit `TLS_DIR`, et l'entrypoint échouait sur un modèle
+    # introuvable en rendant le cas vert.
+    def demarrer(certificats):
+        bac = tempfile.mkdtemp()
+        tls = os.path.join(bac, "tls")
+        os.makedirs(tls)
+        if certificats:
+            for f in ("gateway.crt", "gateway.key"):
+                with open(os.path.join(tls, f), "w") as sortie:
+                    sortie.write("-----BEGIN CERTIFICATE----- (factice)\n")
+        source = os.path.join(RACINE, "docker", "proxy-enrolement")
+        modeles = os.path.join(bac, "modeles")
+        os.makedirs(modeles)
+        shutil.copy(os.path.join(source, "nginx.conf.modele"),
+                    os.path.join(modeles, "nginx.conf.modele"))
+        shutil.copy(os.path.join(source, "relais.conf"),
+                    os.path.join(modeles, "relais.conf.modele"))
+        # `nginx` en doublure : on teste le REFUS, pas le démarrage.
+        faux = os.path.join(bac, "bin")
+        os.makedirs(faux)
+        with open(os.path.join(faux, "nginx"), "w") as sortie:
+            sortie.write("#!/bin/sh\necho DEMARRE\nexit 0\n")
+        os.chmod(os.path.join(faux, "nginx"), 0o755)
+        return subprocess.run(
+            ["sh", os.path.join(source, "entrypoint.sh")],
+            env={"PATH": faux + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"),
+                 "NOM": "gw-01.gateway.test", "API": "https://api.server.test",
+                 "TLS_DIR": tls, "MODELES_DIR": modeles, "RENDUS_DIR": bac},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+
+    sans = demarrer(certificats=False)
+    avec = demarrer(certificats=True)
+    r.verifier(sans.returncode != 0,
+               "sans eux, il REFUSE de démarrer — un proxy qui écoute sans "
+               "pouvoir servir ferme l'enrôlement ET le re-poll de toute la "
+               "flotte servie, en ayant l'air vivant", sans.stderr.decode())
+    r.verifier(b"gateway" in sans.stderr and b"Vault" in sans.stderr,
+               "et son refus NOMME le certificat manquant", sans.stderr.decode())
+    r.verifier(avec.returncode == 0 and b"DEMARRE" in avec.stdout,
+               "alors qu'avec eux il démarre — le contraste, sans quoi le cas "
+               "confondrait ce refus avec n'importe quelle autre panne",
+               (avec.returncode, avec.stderr.decode()))
     r.fin("C-06 wildcard obligatoire")
 
     # =========================================================================
