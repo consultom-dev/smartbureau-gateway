@@ -1,0 +1,72 @@
+# =============================================================================
+# Compose de la PASSERELLE (annexe 3 §7).
+#
+# AUCUN VOLUME DE DONNÉES : la passerelle est SANS ÉTAT, et c'est vérifiable
+# d'un coup d'œil sur ce fichier. Les deux seuls montages portent des
+# secrets tirés de Vault au provisionnement (§2.4) — la panne se répare en
+# redéployant, jamais en restaurant.
+#
+# TROIS CONTENEURS, TROIS MÉTIERS QUI NE SE MÉLANGENT PAS :
+#   wireguard  détient les clés et pose les règles — aucun canal sortant ;
+#   agent      a un canal sortant — aucune clé, aucune règle (invariant 7) ;
+#   proxy      la seule exposition TCP publique, et il ne dépend d'aucun
+#              des deux autres (invariant 9).
+#
+# PAS DE `depends_on` : couplage lâche (§4.1). Une interface pas encore
+# posée, c'est un `wg set` qui échoue et un agent de passerelle qui
+# repassera dans 30 s.
+# =============================================================================
+services:
+
+  wireguard:                       # interfaces, isolation, NAT (§3)
+    image: ${IMG_WG:-consultom/wg:dev}
+    container_name: wireguard
+    network_mode: host             # perf : pas de NAT Docker sur le chemin
+    cap_add: [NET_ADMIN, NET_RAW]  # NET_RAW : matchs xt_ (ipset) sous nft_compat
+    environment:
+      - WG_ROLE=passerelle
+      # C'est LUI qui pose les règles, donc lui qui connaît les interfaces
+      # de sortie (arbitrage Q10). L'agent de passerelle, non.
+      - IFACES_PUBLIQUES=${IFACES_PUBLIQUES:-eth0}
+      - WG_CORE_ADRESSE=${WG_CORE_ADRESSE}
+      - SERVEUR_ENDPOINT=${SERVEUR_ENDPOINT}
+      - SERVEUR_CLE_PUBLIQUE=${SERVEUR_CLE_PUBLIQUE}
+    volumes:
+      - ./wg:/etc/wireguard        # clés tirées de Vault (§2.4)
+    stop_signal: SIGTERM
+    stop_grace_period: 30s         # le temps de retirer règles et interfaces
+    restart: unless-stopped
+    healthcheck:
+      # Tunnel cœur vivant ET isolation en place (§3.3) : une passerelle qui
+      # a perdu wg-core est inutile aux kits, une qui a perdu son isolation
+      # est pire qu'inutile.
+      test: ["CMD-SHELL", "/usr/local/bin/sonde.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  agent:                           # pull /peers + remontée d'état (§4)
+    image: ${IMG_WG_AGENT:-consultom/wg-agent:dev}
+    container_name: wg-agent
+    network_mode: host
+    cap_add: [NET_ADMIN]           # `wg set` et `ipset` — aucune clé, aucune règle
+    extra_hosts:                   # plan machine : aucun A public (invariant 3)
+      - "api.${DOMAINE}:10.100.0.1"
+    environment:
+      - API=https://api.${DOMAINE}
+      - GW_ID=${GW_ID}
+      - AGENT_SECRET=${AGENT_SECRET}     # tiré de Vault au provisionnement
+    restart: unless-stopped
+
+  enrolement-proxy:                # seule exposition TCP publique (§5)
+    image: ${IMG_PROXY_ENROLEMENT:-consultom/proxy-enrolement:dev}
+    container_name: enrolement-proxy
+    ports: ["443:443"]             # pas de port 80 : le certificat vient de Vault
+    extra_hosts:                   # plan machine : aucun A public (invariant 3)
+      - "api.${DOMAINE}:10.100.0.1"
+    environment:
+      - NOM=${GW_ID}.gateway.${DOMAINE}
+      - API=https://api.${DOMAINE}
+    volumes:
+      - ./tls:/etc/proxy/tls:ro    # wildcard *.gateway tiré de Vault
+    restart: unless-stopped
