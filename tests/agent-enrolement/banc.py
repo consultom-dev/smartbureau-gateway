@@ -2,7 +2,7 @@
 # =============================================================================
 # Le banc de l'agent d'enrôlement — tout ce qui n'est pas un cas de test.
 #
-# Il monte trois choses et les démonte proprement :
+# Il monte quatre choses et les démonte proprement :
 #
 #   1. LE MOCK du plan de contrôle (`smartbureau-server/contrats/mock/`),
 #      sur sa **surface proxy** : `POST /enroler` et `GET /config-kit`, et
@@ -19,7 +19,20 @@
 #      pas → `--resolve`, nom conservé), qui est le chemin le moins évident
 #      et le plus facile à casser.
 #
-#   3. DES DOUBLURES pour `wg`, `wg-quick` et `ip`, en tête de `PATH`. Le
+#   3. UN RÉSOLVEUR DU BANC : le chemin de repli de l'arbitrage Q3 ne se
+#      déclenche que sur un échec de RÉSOLUTION (curl 6) — il faut donc que
+#      le nom `gw-01.gateway.smartbureau.example` échoue VITE. Confier cet
+#      échec au DNS de la machine est une dépendance extérieure cachée : sur
+#      un lien lent (constaté sur le Pi de labo, 4G), une réponse NXDOMAIN
+#      qui dépasse AGENT_DELAI_HTTP_S fait sortir curl en 28, le tour est
+#      perdu, et le banc flotte — jamais sur le même cas. Le banc répond
+#      donc lui-même NXDOMAIN (127.88.99.53:53, en microsecondes), et
+#      l'agent d'enrôlement tourne dans un mount-namespace privé où
+#      `/etc/resolv.conf` pointe dessus. Rien ne sort de la machine, rien
+#      n'est modifié sur l'hôte. (`localhost`, lui, se résout par
+#      `/etc/hosts` — la voie « nom qui résout » d'A-13 n'est pas touchée.)
+#
+#   4. DES DOUBLURES pour `wg`, `wg-quick` et `ip`, en tête de `PATH`. Le
 #      banc recette la MACHINE À ÉTATS et les ÉCRITURES D'ÉTAT, pas la
 #      cryptographie de WireGuard : les interfaces sont l'affaire de
 #      `tests/roles/` (qui exige, lui, sudo et le module noyau). Les
@@ -28,8 +41,10 @@
 #      passe par `wg syncconf` et jamais par un `wg-quick down`.
 #
 # Aucune dépendance : bibliothèque standard, `curl`, `jq`, `sh`. Ni Docker
-# ni privilège réseau — c'est ce qui rend la tranche 2 recettable là où
-# `tests/roles/` se déclare sauté.
+# ni module noyau — c'est ce qui rend la tranche 2 recettable là où
+# `tests/roles/` se déclare sauté. (Le résolveur du banc souhaite le port
+# 53 sur la boucle locale — root, que les cas exigent déjà — et se dégrade
+# proprement sans lui : comportement d'avant, exact mais flottant.)
 # =============================================================================
 
 import json
@@ -134,6 +149,51 @@ class Banc:
         self.tls_ecoute = None
         self.tls_ca = None
         self.tls_ca_etrangere = None
+        self.resolveur_ecoute = None
+        self.resolv_conf = None
+        self.demarrer_resolveur()
+
+    # --- Le résolveur du banc ----------------------------------------------
+
+    def demarrer_resolveur(self):
+        """NXDOMAIN immédiat, pour que le repli Q3 ne dépende d'aucun DNS réel.
+
+        Port 53 sur une adresse de la boucle locale (tout 127/8 écoute sans
+        rien configurer) : il faut être root — ce que les cas exigent déjà.
+        Sans root, on laisse le DNS de la machine faire (comportement
+        d'avant, exact mais flottant sur lien lent).
+        """
+        try:
+            ecoute = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            ecoute.bind(("127.88.99.53", 53))
+        except OSError:
+            return
+        ecoute.settimeout(0.5)
+        self.resolveur_ecoute = ecoute
+        self.resolveur_arret = threading.Event()
+
+        def repondre():
+            while not self.resolveur_arret.is_set():
+                try:
+                    requete, origine = ecoute.recvfrom(512)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if len(requete) < 12:
+                    continue
+                # Réponse minimale : même identifiant, mêmes questions,
+                # drapeaux QR|RD|RA, RCODE 3 (NXDOMAIN), zéro enregistrement.
+                entete = requete[:2] + b"\x81\x83" + requete[4:6] + b"\x00\x00\x00\x00\x00\x00"
+                try:
+                    ecoute.sendto(entete + requete[12:], origine)
+                except OSError:
+                    pass
+
+        threading.Thread(target=repondre, daemon=True).start()
+        self.resolv_conf = os.path.join(self.racine, "resolv.conf")
+        with open(self.resolv_conf, "w") as f:
+            f.write("nameserver 127.88.99.53\noptions timeout:1 attempts:1\n")
 
     # --- Le mock ------------------------------------------------------------
 
@@ -213,6 +273,12 @@ class Banc:
         return False
 
     def arreter(self):
+        if self.resolveur_ecoute:
+            self.resolveur_arret.set()
+            try:
+                self.resolveur_ecoute.close()
+            except OSError:
+                pass
         if self.tls_arret:
             self.tls_arret.set()
             try:
@@ -443,8 +509,18 @@ class Banc:
             environnement["AGENT_REPOLL_PORT"] = str(tls)
         if ca:
             environnement["CURL_CA_BUNDLE"] = ca
+        commande = ["sh", AGENT]
+        if self.resolv_conf and shutil.which("unshare"):
+            # Mount-namespace privé (propagation coupée par défaut) : le
+            # resolv.conf du banc n'est visible que de l'agent d'enrôlement,
+            # l'hôte n'est jamais touché. `mount` suit le lien symbolique
+            # qu'est /etc/resolv.conf sur la plupart des hôtes.
+            commande = ["unshare", "--mount", "sh", "-c",
+                        'mount --bind "$BANC_RESOLV" /etc/resolv.conf && exec sh "$0"',
+                        AGENT]
+            environnement["BANC_RESOLV"] = self.resolv_conf
         debut = time.time()
-        acheve = subprocess.run(["sh", AGENT], env=environnement, timeout=timeout,
+        acheve = subprocess.run(commande, env=environnement, timeout=timeout,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return acheve, time.time() - debut
 
