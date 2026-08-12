@@ -112,5 +112,5 @@ Recette : `tests/roles/` (R-01 … R-06, tranche 1 — les trois rôles
 montent ; **sudo et module noyau `wireguard`**),
 `tests/agent-enrolement/` (A-01 … A-17, tranche 2 — la machine à états
 contre le mock ; **ni Docker ni module noyau**), `tests/watchdog/`
-(W-01 … W-11, tranche 3 — **ni root, ni Docker, ni réseau**) et
+(W-01 … W-12, tranche 3 — **ni root, ni Docker, ni réseau**) et
 `tests/netfilter/` (P-01 … P-20, lot 4).

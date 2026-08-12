@@ -3,7 +3,7 @@
 # Rôle KIT — wg0, agent d'enrôlement, watchdog, marqueurs
 # (annexe 2 §3 ; arch. §6.2).
 #
-# Quatre processus, une hiérarchie stricte :
+# Une interface et TROIS processus, dans une hiérarchie stricte :
 #   - wg0 : la conf est écrite par l'agent d'enrôlement à l'enrôlement
 #     (jamais provisionnée, jamais versionnée — elle porte la clé privée du
 #     kit). Au premier démarrage elle n'existe pas encore : on l'attend.
@@ -15,7 +15,8 @@
 #     l'agent d'enrôlement (annexe 2, invariant 5) — il ne lit qu'endpoints.txt et
 #     port, et la bascule fonctionne agent d'enrôlement mort ;
 #   - la boucle de marqueurs (60 s) : elle publie etat.json pour `sante`,
-#     et n'observe que — trois cadences, aucune n'attend les autres.
+#     et n'observe que. Avec `sante` (15 min), cela fait les quatre
+#     horloges de l'annexe 2 — aucune n'attend les autres.
 #
 # Ce script n'écrit NI route NI règle (annexe 2 §3.5) : Table = off dans la
 # conf, le routage appartient au plancher reseau-hote, l'aiguillage à

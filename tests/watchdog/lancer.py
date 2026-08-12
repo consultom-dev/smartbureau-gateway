@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# Cas W-01 … W-11 — le watchdog de bascule et la boucle de marqueurs
+# Cas W-01 … W-12 — le watchdog de bascule et la boucle de marqueurs
 # (critère de fini 3 du lot 2, plan §4 : « passerelle simulée muette →
 # bascule d'endpoint ≤ 60 s ; l'agent d'enrôlement tué → la bascule
 # fonctionne encore »).
@@ -53,7 +53,19 @@ case "$1" in
     # wg set <iface> peer <cle> endpoint <ip:port>
     [ "$5" = "endpoint" ] || exit 1
     printf '%s\\n' "$6" > "$BANC_ENDPOINT"
-    printf '%s\\n' "$4" > "$BANC_PEER_POSE" ;;
+    # APPEND : c'est l'HISTORIQUE des clés posées qui est intéressant, pas
+    # la dernière — une clé mémorisée se voit à ce qu'elle se répète.
+    printf '%s\\n' "$4" >> "$BANC_PEER_POSE"
+    # Mutations « entre deux battements », armées par le banc : le monde
+    # change pendant que le watchdog tourne, dans le MÊME processus.
+    if [ -f "$BANC_PORT_APRES" ]; then
+      cat "$BANC_PORT_APRES" > "$CONTROLE/port"; rm -f "$BANC_PORT_APRES"
+    fi
+    if [ -f "$BANC_PEER_APRES" ]; then
+      cat "$BANC_PEER_APRES" > "$BANC_PEER"; rm -f "$BANC_PEER_APRES"
+    fi ;;
+  genkey) printf 'cle-privee-de-recette\\n' ;;
+  pubkey) lu=$(cat); printf 'publique-de-%s\\n' "$lu" ;;
 esac
 exit 0
 """
@@ -131,16 +143,58 @@ class Banc:
             "BANC_HANDSHAKE": os.path.join(base, "handshake"),
             "BANC_WG0": os.path.join(base, "wg0"),
             "BANC_MUET": os.path.join(base, "muet"),
+            "BANC_PORT_APRES": os.path.join(base, "port-apres"),
+            "BANC_PEER_APRES": os.path.join(base, "peer-apres"),
         })
         return env
 
+    def armer(self, base, quoi, valeur):
+        """Ce que la doublure `wg` appliquera au PREMIER `wg set` — donc
+        entre deux battements du même processus."""
+        self.ecrire(base, quoi, valeur)
+
+    def cles_posees(self, base):
+        chemin = os.path.join(base, "peer-pose")
+        if not os.path.exists(chemin):
+            return []
+        with open(chemin) as f:
+            return f.read().split()
+
+    def bascules(self, base):
+        return [a.split()[-1] for a in self.appels(base) if a.startswith("wg set")]
+
     def watchdog(self, base, controle, tours=1, periode=0, timeout=60):
         env = self.environnement(base, controle)
-        env.update({"WATCHDOG_TOURS": str(tours), "WATCHDOG_PERIODE_S": str(periode)})
+        env["WATCHDOG_TOURS"] = str(tours)
+        # `periode=None` laisse le DÉFAUT du script — la cadence du corpus.
+        if periode is not None:
+            env["WATCHDOG_PERIODE_S"] = str(periode)
         debut = time.time()
         acheve = subprocess.run(["sh", WATCHDOG], env=env, timeout=timeout,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return acheve, time.time() - debut
+
+    def agent_enrolement(self, base, controle):
+        """Un VRAI agent d'enrôlement, en USINE, dont le plan de contrôle est
+        injoignable — il boucle sur son backoff. Rendu vivant, à tuer."""
+        agent = os.path.join(RACINE, "docker", "wg", "agent-enrolement.sh")
+        if not os.path.isfile(agent):
+            return None
+        conf = os.path.join(base, "wireguard")
+        os.makedirs(conf, exist_ok=True)
+        with open(os.path.join(controle, "usine.json"), "w") as f:
+            json.dump({"kit_id": "A0001", "secret": "secret-de-recette",
+                       # port 1 : rien n'écoute, `curl` échoue tout de suite
+                       "enrolement": ["http://127.0.0.1:1/enroler"],
+                       "repli": [], "local": {}}, f)
+        env = self.environnement(base, controle)
+        env.update({"WG_CONF": conf, "AGENT_TOURS": "0",
+                    "AGENT_BACKOFF_MIN_S": "1", "AGENT_BACKOFF_MAX_S": "1",
+                    "AGENT_DELAI_HTTP_S": "2", "no_proxy": "*"})
+        for cle in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            env.pop(cle, None)
+        return subprocess.Popen(["sh", agent], env=env,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def marqueurs(self, base, controle, tours=1, periode=0, timeout=60):
         env = self.environnement(base, controle)
@@ -174,7 +228,8 @@ if MOTIF:
     for nom in ["W-01 chemin sain", "W-02 bascule", "W-03 rotation circulaire",
                 "W-04 port relu", "W-05 clé du peer", "W-06 bascule ≤ 60 s",
                 "W-07 agent d'enrôlement mort", "W-08 liste absente",
-                "W-09 interface absente", "W-10 marqueurs", "W-11 marqueurs prudents"]:
+                "W-09 interface absente", "W-10 marqueurs", "W-11 marqueurs prudents",
+                "W-12 agent d'enrôlement tué"]:
         r.cas(nom, "annexe 2 §3.4")
         r.sauter(nom, MOTIF)
     sortir(r)
@@ -195,9 +250,10 @@ try:
                banc.appels(base))
     r.verifier(sum(1 for a in banc.appels(base) if a.startswith("ping")) == 3,
                "un ping par battement, et c'est tout")
-    r.verifier("-c3 -W2 10.100.0.1" in " ".join(banc.appels(base)),
+    r.verifier("-c3 -W2 -w10 10.100.0.1" in " ".join(banc.appels(base)),
                "le ping vise 10.100.0.1 — le SERVEUR, donc le chemin complet, "
-               "pas le handshake de la passerelle", banc.appels(base))
+               "pas le handshake de la passerelle — et il est BORNÉ (-w10)",
+               banc.appels(base))
     r.fin("W-01 chemin sain")
 
     # =========================================================================
@@ -227,42 +283,61 @@ try:
     r.verifier(banc.lire(base, "endpoint") == "203.0.113.10:51820",
                "endpoint courant absent de la liste → on repart de la tête",
                banc.lire(base, "endpoint"))
+    # Un DOUBLON gèlerait le kit si le rang se prenait à la dernière
+    # occurrence : « courant » et « dernier » coïncideraient, la rotation
+    # renverrait la tête — c'est-à-dire l'endpoint mort qu'on vient de
+    # quitter, toutes les 30 s, indéfiniment.
+    base, controle = banc.sable("w03ter", muet=True,
+                                endpoints=("203.0.113.10", "198.51.100.7",
+                                           "203.0.113.10"))
+    banc.watchdog(base, controle, tours=1)
+    r.verifier(banc.lire(base, "endpoint") == "198.51.100.7:51820",
+               "un doublon ne gèle pas le kit : le rang se prend à la "
+               "PREMIÈRE occurrence", banc.lire(base, "endpoint"))
     r.fin("W-03 rotation circulaire")
 
     # =========================================================================
     r.cas("W-04 — le port est RELU à chaque commutation, jamais mémorisé",
           "annexe 2 §3.2 et §3.4 (arbitrage N4) ; arch. §11.4")
+    # DEUX BATTEMENTS DANS LE MÊME PROCESSUS : c'est la seule façon de voir
+    # une mémorisation. Deux exécutions successives relisent forcément le
+    # fichier, et un watchdog qui garde le port en variable passerait.
+    # La rotation (§11.4) survient ENTRE les deux : la doublure `wg` écrit
+    # 51830 dans `port` au premier `wg set`.
     base, controle = banc.sable("w04", muet=True)
-    banc.watchdog(base, controle, tours=1)
-    r.verifier(banc.lire(base, "endpoint").endswith(":51820"),
-               "première bascule sur le port courant", banc.lire(base, "endpoint"))
-    # Rotation de la clé partagée : la double écoute impose 51830 (§11.4).
-    with open(os.path.join(controle, "port"), "w") as f:
-        f.write("51830\n")
-    banc.watchdog(base, controle, tours=1)
-    r.verifier(banc.lire(base, "endpoint") == "192.0.2.30:51830",
-               "la bascule suivante emploie 51830 — un watchdog qui mémorise "
-               "le port rebascule sur l'ancien au pire moment",
-               banc.lire(base, "endpoint"))
+    banc.armer(base, "port-apres", "51830")
+    banc.watchdog(base, controle, tours=2)
+    portes = banc.bascules(base)
+    r.verifier(len(portes) == 2, "deux battements, deux commutations", portes)
+    r.verifier(portes[:1] == ["198.51.100.7:51820"],
+               "la première emploie le port courant", portes)
+    r.verifier(portes[1:] == ["192.0.2.30:51830"],
+               "la seconde emploie 51830 — le port est RELU, pas mémorisé : "
+               "un watchdog qui le garde en variable rebascule sur l'ancien "
+               "port au pire moment (arbitrage N4)", portes)
     r.fin("W-04 port relu")
 
     # =========================================================================
     r.cas("W-05 — la clé du peer vient de `wg show`, jamais d'une mémoire",
           "annexe 2 §3.4 (arbitrage Q7)")
+    # Même montage qu'en W-04, et pour la même raison : la rotation de la
+    # clé partagée survient ENTRE deux battements du même processus :
+    # l'agent d'enrôlement a réécrit le [Peer] et resynchronisé, et le
+    # watchdog, lui, n'a rien à apprendre — il relit l'interface.
     base, controle = banc.sable("w05", muet=True)
-    banc.watchdog(base, controle, tours=1)
-    # Rotation de la clé partagée : l'agent d'enrôlement réécrit le [Peer] et
-    # resynchronise. Le watchdog, lui, n'a rien à apprendre — il relit.
-    banc.ecrire(base, "peer", "NOUVELLE-CLE-APRES-ROTATION=")
-    banc.watchdog(base, controle, tours=1)
-    r.verifier(banc.lire(base, "peer-pose") == "NOUVELLE-CLE-APRES-ROTATION=",
-               "la commutation emploie la clé COURANTE de l'interface",
-               banc.lire(base, "peer-pose"))
-    r.verifier("GW_PUBKEY" not in lire_source,
-               "aucune clé de passerelle en variable d'environnement ni en dur")
-    r.verifier("wg0.conf" not in lire_source,
-               "et le watchdog ne lit pas non plus wg0.conf — deux fichiers, "
-               "pas trois (invariant 5)")
+    banc.armer(base, "peer-apres", "NOUVELLE-CLE-APRES-ROTATION=")
+    banc.watchdog(base, controle, tours=2)
+    cles = banc.cles_posees(base)
+    r.verifier(len(cles) == 2, "deux battements, deux commutations", cles)
+    r.verifier(cles[0] == "CLE-PARTAGEE-DES-PASSERELLES=",
+               "la première emploie la clé courante", cles)
+    r.verifier(cles[1] == "NOUVELLE-CLE-APRES-ROTATION=",
+               "la seconde emploie la NOUVELLE clé : elle est relue sur "
+               "l'interface à chaque commutation, jamais mémorisée ni tenue "
+               "d'une variable d'environnement (arbitrage Q7)", cles)
+    r.verifier("GW_PUBKEY" not in lire_source and "wg0.conf" not in lire_source,
+               "et le source ne va la chercher ni dans une variable connue "
+               "ni dans wg0.conf — deux fichiers, pas trois (invariant 5)")
     r.fin("W-05 clé du peer")
 
     # =========================================================================
@@ -277,9 +352,19 @@ try:
     r.verifier(banc.lire(base, "endpoint") == "198.51.100.7:51820",
                "la bascule a lieu dès le PREMIER battement qui constate la panne "
                "— pas au suivant", banc.lire(base, "endpoint"))
-    r.verifier(duree < 5,
-               "et sans délai supplémentaire (30 s + 6 s au pire, soit < 60 s "
-               "avec les valeurs du corpus)", "%.1fs" % duree)
+    r.verifier(duree < 5, "et sans délai supplémentaire", "%.1fs" % duree)
+    # Et une fois pour de vrai, à la CADENCE DU CORPUS : les deux assertions
+    # ci-dessus se lisent sur le source, celle-ci se mesure. C'est le seul
+    # cas long de la recette (~30 s), et c'est le critère de fini.
+    r.tracer("mesure à la cadence réelle (30 s) — patienter…")
+    base, controle = banc.sable("w06-reel", muet=True)
+    acheve, duree = banc.watchdog(base, controle, tours=1, periode=None, timeout=120)
+    r.verifier(banc.lire(base, "endpoint") == "198.51.100.7:51820",
+               "à la cadence par défaut, la bascule a bien lieu",
+               banc.lire(base, "endpoint"))
+    r.verifier(30 <= duree < 60,
+               "et elle tient dans les 60 s du critère de fini — MESURÉ, pas lu",
+               "%.1fs" % duree)
     r.fin("W-06 bascule ≤ 60 s")
 
     # =========================================================================
@@ -316,6 +401,14 @@ try:
                "et ne commute pas au hasard")
     r.verifier("aucune bascule possible" in acheve.stderr.decode(),
                "il le dit, plutôt que d'échouer en silence")
+    for libelle, contenu in (("vide", ""), ("sans aucune IP", "# rien ici\n\n")):
+        base, controle = banc.sable("w08-" + libelle.split()[0], muet=True)
+        with open(os.path.join(controle, "endpoints.txt"), "w") as f:
+            f.write(contenu)
+        acheve, _ = banc.watchdog(base, controle, tours=1)
+        r.verifier(acheve.returncode == 0 and not banc.bascules(base),
+                   "liste %s : aucune commutation, et le watchdog vit" % libelle,
+                   banc.bascules(base))
     r.fin("W-08 liste absente")
 
     # =========================================================================
@@ -329,12 +422,23 @@ try:
                banc.appels(base))
     r.verifier(not any(a.startswith("wg set") for a in banc.appels(base)),
                "et ne commute rien")
+    # `(none)` est ce que `wg show <iface> endpoints` rend RÉELLEMENT pour un
+    # peer sans endpoint — l'état d'un kit fraîchement enrôlé, avant son
+    # premier handshake. Il ne figure dans aucune liste : on part de la tête.
+    base, controle = banc.sable("w09bis", muet=True, endpoint_courant="(none)")
+    banc.watchdog(base, controle, tours=1)
+    r.verifier(banc.lire(base, "endpoint") == "203.0.113.10:51820",
+               "peer sans endpoint (« (none) ») → on pose la tête de liste",
+               banc.lire(base, "endpoint"))
     r.fin("W-09 interface absente")
 
     # =========================================================================
     r.cas("W-10 — la boucle de marqueurs publie etat.json, et elle seule",
           "annexe 2 §3.2 ; §4 (`sante`)")
-    base, controle = banc.sable("w10")
+    # Le banc est MUET : sans cela le watchdog ne rentrerait jamais dans
+    # `commuter`, et l'assertion « il ne touche pas etat.json » serait
+    # décorative — elle passerait sur du code qui n'a pas tourné.
+    base, controle = banc.sable("w10", muet=True)
     with open(os.path.join(controle, "etat-agent.json"), "w") as f:
         json.dump({"etat": "suspendu", "code_config_kit": "403",
                    "detail": "kit suspendu", "horodatage": "2026-08-12T00:00:00Z"}, f)
@@ -353,6 +457,8 @@ try:
     # Un seul propriétaire : le watchdog ne touche jamais etat.json.
     avant = os.stat(chemin).st_mtime_ns
     banc.watchdog(base, controle, tours=2)
+    r.verifier(banc.bascules(base), "le watchdog a bien commuté pendant ce temps",
+               banc.bascules(base))
     r.verifier(os.stat(chemin).st_mtime_ns == avant,
                "et le watchdog n'y touche jamais — un fichier atomique n'a "
                "qu'un propriétaire (§3.2)")
@@ -379,6 +485,31 @@ try:
     r.verifier(etat["endpoint"] == "" and etat["dernier_handshake"] == 0,
                "sans interface, aucun endpoint et aucun handshake inventés", etat)
     r.fin("W-11 marqueurs prudents")
+
+    # =========================================================================
+    r.cas("W-12 — l'agent d'enrôlement TUÉ : la bascule fonctionne encore",
+          "annexe 2, invariant 5 ; plan §4, critère de fini 3")
+    # W-07 prouve que deux fichiers suffisent. Ici on prouve l'autre moitié,
+    # littéralement : un VRAI agent d'enrôlement tourne, on le tue, et le
+    # watchdog bascule quand même. Sans mock : il reste en USINE et son
+    # `curl` échoue en boucle, ce qui est exactement l'état d'un kit dont le
+    # plan de contrôle est injoignable.
+    base, controle = banc.sable("w12", muet=True)
+    agent = banc.agent_enrolement(base, controle)
+    if agent is None:
+        r.verifier(False, "l'agent d'enrôlement n'a pas démarré")
+    else:
+        time.sleep(1)
+        r.verifier(agent.poll() is None, "l'agent d'enrôlement tourne")
+        agent.kill()
+        agent.wait(timeout=10)
+        r.verifier(agent.poll() is not None, "il est tué (SIGKILL, aucun adieu)")
+        acheve, _ = banc.watchdog(base, controle, tours=1)
+        r.verifier(banc.lire(base, "endpoint") == "198.51.100.7:51820",
+                   "et la bascule a lieu quand même — le watchdog ne dépend "
+                   "d'aucun processus (invariant 5)",
+                   banc.lire(base, "endpoint") + " " + acheve.stderr.decode()[-200:])
+    r.fin("W-12 agent d'enrôlement tué")
 
 finally:
     banc.arreter()

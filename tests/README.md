@@ -6,7 +6,7 @@
 |---|---|---|---|
 | `roles/` | les cas **R-01 … R-06** — les trois rôles montent leurs interfaces (**sudo + module noyau `wireguard`**) | 2 | annexe 7 §1, arch. §6.2 |
 | `agent-enrolement/` | les cas **A-01 … A-17** — la machine à états rejouée **contre le mock** (ni Docker ni module noyau) | 2 | annexe 2 §3.2 et §3.3 |
-| `watchdog/` | les cas **W-01 … W-11** — la bascule d'endpoint et la boucle de marqueurs (ni root, ni Docker, ni réseau) | 2 | annexe 2 §3.4 et §3.4 bis |
+| `watchdog/` | les cas **W-01 … W-12** — la bascule d'endpoint et la boucle de marqueurs (ni root, ni Docker, ni réseau) | 2 | annexe 2 §3.4 et §3.4 bis |
 | `netfilter/` | les cas **P-01 … P-20** sur le gabarit partagé | 4 | annexe 3 §8 |
 | `agent-passerelle/` | la boucle : diff, 401, ipset | 4 | annexe 3 §4 |
 

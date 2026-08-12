@@ -31,10 +31,9 @@ journal() { printf 'wg(%s): %s\n' "${WG_ROLE:-?}" "$*" >&2; }
 
 # --- Écriture d'un fichier d'état : atomique, mode et propriétaire compris --
 #
-# UNE SEULE implémentation pour tout le conteneur (agent d'enrôlement,
-# boucle de marqueurs) : c'est une primitive de sécurité — le mode est posé
-# sur un fichier VIDE, avant le premier octet de contenu —, et une primitive
-# de sécurité qui existe en deux exemplaires finit par diverger.
+# ESPACE DE NOMS — POSIX sh n'a pas de `local` : ce fichier réserve
+# `_chemin _mode _groupe _rep _tmp` (poser), `_strip` (resynchroniser) et
+# `_iface` (descendre, tenir). Ses appelants n'écrivent jamais dedans.
 poser() { # $1 chemin  $2 mode  $3 groupe (vide = aucun chown de groupe)
           # contenu sur l'entrée standard
   _chemin="$1"; _mode="$2"; _groupe="${3:-}"
@@ -100,12 +99,12 @@ resynchroniser() { # $1 nom d'interface — montée, conf présente
   # `wg syncconf` échoue et que set -e nous fait sortir. POSIX sh n'a pas
   # de <(…), d'où le fichier ; il n'a pas de trap RETURN, d'où le nettoyage
   # explicite avant chaque sortie.
-  strip="$(mktemp)"
-  wg-quick strip "$WG_CONF/$1.conf" > "$strip" \
-    || { rm -f "$strip"; return 1; }
-  wg syncconf "$1" "$strip" \
-    || { rm -f "$strip"; return 1; }
-  rm -f "$strip"
+  _strip="$(mktemp)"
+  wg-quick strip "$WG_CONF/$1.conf" > "$_strip" \
+    || { rm -f "$_strip"; return 1; }
+  wg syncconf "$1" "$_strip" \
+    || { rm -f "$_strip"; return 1; }
+  rm -f "$_strip"
 }
 
 monter() { # $1 nom d'interface — la conf DOIT exister
@@ -124,18 +123,18 @@ monter() { # $1 nom d'interface — la conf DOIT exister
 }
 
 descendre() { # $* interfaces, dans l'ordre donné
-  for iface in "$@"; do
-    wg-quick down "$WG_CONF/$iface.conf" 2>/dev/null \
-      || ip link del "$iface" 2>/dev/null || true
+  for _iface in "$@"; do
+    wg-quick down "$WG_CONF/$_iface.conf" 2>/dev/null \
+      || ip link del "$_iface" 2>/dev/null || true
   done
 }
 
 tenir() { # $* interfaces à surveiller — mort bruyante si l'une disparaît
   while :; do
     sleep 15
-    for iface in "$@"; do
-      ip link show "$iface" >/dev/null 2>&1 || {
-        journal "$iface a disparu — arrêt (le compose relance)"
+    for _iface in "$@"; do
+      ip link show "$_iface" >/dev/null 2>&1 || {
+        journal "$_iface a disparu — arrêt (le compose relance)"
         # Redescendre les interfaces SURVIVANTES avant de sortir : la
         # promesse « pas d'interface orpheline en netns hôte » vaut aussi
         # sur le chemin de crash, pas seulement sur l'arrêt par signal.

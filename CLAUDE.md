@@ -86,7 +86,7 @@ sudo SMARTBUREAU_SERVER=/chemin/vers/smartbureau-server \
 
 # Tranche 3 — la bascule d'endpoint et les marqueurs
 # Ni root, ni Docker, ni réseau : sh, jq, awk
-./tests/watchdog/lancer.py                # W-01 … W-11
+./tests/watchdog/lancer.py                # W-01 … W-12 (~35 s)
 
 # Le lint partagé (il vit dans smartbureau-server)
 SMARTBUREAU_SERVER=… /chemin/vers/smartbureau-server/outillage/lint/lint.sh

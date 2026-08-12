@@ -30,7 +30,10 @@
 set -u
 
 ICI="$(cd "$(dirname "$0")" && pwd)"
-. "$ICI/roles/commun.sh"
+. "$ICI/roles/commun.sh" || {
+  printf 'wg(marqueurs): socle %s/roles/commun.sh introuvable — arrêt\n' "$ICI" >&2
+  exit 1
+}
 
 WG_ROLE="${WG_ROLE:-kit}"
 IFACE="${MARQUEURS_IFACE:-wg0}"
@@ -38,22 +41,31 @@ ETAT="$CONTROLE/etat.json"
 ETAT_AGENT="$CONTROLE/etat-agent.json"
 PERIODE="${MARQUEURS_PERIODE_S:-60}"
 TOURS_MAX="${MARQUEURS_TOURS:-0}"       # 0 = sans fin, le régime du kit
+case "$PERIODE"   in ''|*[!0-9]*) PERIODE=60 ;; esac
+case "$TOURS_MAX" in ''|*[!0-9]*) TOURS_MAX=0 ;; esac
 
 journal() { printf 'wg(marqueurs): %s\n' "$*" >&2; }
 
 battre() {
-  _etat=usine
-  _code="-"
-  if lisible "$ETAT_AGENT"; then
-    _etat="$(jq -r '.etat // "usine"' "$ETAT_AGENT" 2>/dev/null)"
+  # ABSENT et INEXPLOITABLE ne se confondent pas (§3.4 bis). Le fichier
+  # absent, c'est un kit qui n'a encore rien écrit : `usine`, l'état de
+  # départ. Le fichier présent mais vide, illisible, sans champ `etat` ou
+  # portant une valeur hors vocabulaire, c'est `inconnu` — et la nuance
+  # n'est pas byzantine : `usine` est le plus TROMPEUR des états, puisqu'il
+  # fait voir au serveur un kit qui n'aurait jamais été enrôlé.
+  _horodatage_agent=""
+  if [ ! -e "$ETAT_AGENT" ]; then
+    _etat=usine
+    _code="-"
+  else
+    _etat="$(jq -r '.etat // empty' "$ETAT_AGENT" 2>/dev/null)"
     _code="$(jq -r '.code_config_kit // "-"' "$ETAT_AGENT" 2>/dev/null)"
+    _horodatage_agent="$(jq -r '.horodatage // empty' "$ETAT_AGENT" 2>/dev/null)"
+    case "${_etat:-}" in
+      usine|enrole|suspendu|identite_perdue) : ;;
+      *) _etat=inconnu; _code="-" ;;
+    esac
   fi
-  # Un `etat-agent.json` illisible ne se devine pas : on le dit, plutôt que
-  # de publier un état inventé que `sante` remonterait comme une vérité.
-  case "${_etat:-}" in
-    usine|enrole|suspendu|identite_perdue) : ;;
-    *) _etat=inconnu ;;
-  esac
 
   _endpoint=""
   _handshake=0
@@ -67,12 +79,28 @@ battre() {
   # et `poser` publierait consciencieusement un `etat.json` de zéro octet —
   # `sante` remonterait alors l'absence d'état comme un état. Une valeur vide
   # ne remplace jamais un fichier d'état (§3.2).
+  # DEUX horodatages, et c'est voulu (§3.4 bis) : `horodatage` date le
+  # battement de marqueurs — la fraîcheur de l'OBSERVATION —, tandis que
+  # `horodatage_agent` est recopié et date l'ÉTAT. Sans le second, un agent
+  # d'enrôlement mort serait invisible : rien ne le surveille (le conteneur
+  # survit à sa mort), et cette boucle republierait son dernier état toutes
+  # les 60 s, horodaté à MAINTENANT. C'est `sante` qui juge l'écart.
   _rendu="$(jq -n --arg etat "$_etat" --arg code "$_code" \
         --arg endpoint "${_endpoint:-}" --argjson handshake "$_handshake" \
         --arg horodatage "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg horodatage_agent "${_horodatage_agent:-}" \
      '{etat: $etat, code_config_kit: $code, endpoint: $endpoint,
-       dernier_handshake: $handshake, horodatage: $horodatage}')" || return 1
+       dernier_handshake: $handshake, horodatage: $horodatage,
+       horodatage_agent: $horodatage_agent}')" || return 1
   poser_valeur "$_rendu" "$ETAT" 644
+}
+
+# Un SIGKILL entre `mktemp` et `mv` laisse un temporaire dans `controle/`.
+# Personne d'autre ne passe par là : la boucle la plus lente le balaie, et
+# seulement au-delà d'une heure — jamais celui qu'un voisin est en train
+# d'écrire.
+balayer() {
+  find "$CONTROLE" -maxdepth 2 -name '.tmp-wg.*' -type f -mmin +60 -delete 2>/dev/null
 }
 
 journal "démarrage — période ${PERIODE}s, $ETAT (annexe 2 §3.2)"
@@ -80,6 +108,7 @@ tour=0
 while :; do
   tour=$((tour + 1))
   battre || journal "battement manqué — $ETAT conservé en l'état"
+  balayer
   if [ "$TOURS_MAX" -ne 0 ] && [ "$tour" -ge "$TOURS_MAX" ]; then break; fi
   sleep "$PERIODE"
 done

@@ -2,7 +2,9 @@
 # =============================================================================
 # Le WATCHDOG du kit — bascule d'endpoint (annexe 2 §3.4 ; arch. §6.2, §7).
 #
-# Toutes les 30 s : `ping -c3 -W2 10.100.0.1`. En échec, il commute le peer
+# Toutes les 30 s : `ping -c3 -W2 -w10 10.100.0.1` (le `-w` borne le test
+# quoi que fasse la variante d'iputils : 30 + 10 < 60, le critère de fini
+# tient par construction). En échec, il commute le peer
 # de wg0 sur l'endpoint suivant d'`endpoints.txt`. C'est tout, et c'est
 # volontairement tout.
 #
@@ -35,7 +37,13 @@
 set -u
 
 ICI="$(cd "$(dirname "$0")" && pwd)"
-. "$ICI/roles/commun.sh"
+# Sans `set -e`, un socle introuvable ferait sortir plus loin sur `set -u`,
+# avec une erreur de shell brute et AUCUNE ligne `wg(watchdog):` — soit
+# exactement le « kit sans bascule, en silence » que cet en-tête interdit.
+. "$ICI/roles/commun.sh" || {
+  printf 'wg(watchdog): socle %s/roles/commun.sh introuvable — arrêt\n' "$ICI" >&2
+  exit 1
+}
 
 WG_ROLE="${WG_ROLE:-kit}"
 IFACE="${WATCHDOG_IFACE:-wg0}"
@@ -47,19 +55,33 @@ PORT="$CONTROLE/port"
 CIBLE="${WATCHDOG_CIBLE:-10.100.0.1}"
 PERIODE="${WATCHDOG_PERIODE_S:-30}"
 TOURS_MAX="${WATCHDOG_TOURS:-0}"        # 0 = sans fin, le régime du kit
+# Ces deux-là gouvernent la boucle : une valeur non numérique ferait
+# échouer `sleep` instantanément et tourner le watchdog à 100 % de CPU,
+# pour toujours. Elles arrivent par l'environnement, donc on les vérifie.
+case "$PERIODE"   in ''|*[!0-9]*) PERIODE=30 ;; esac
+case "$TOURS_MAX" in ''|*[!0-9]*) TOURS_MAX=0 ;; esac
 
 journal() { printf 'wg(watchdog): %s\n' "$*" >&2; }
 
 # L'endpoint suivant dans la liste, en ROTATION CIRCULAIRE à partir de celui
-# que porte l'interface. Deux cas particuliers, tous deux voulus :
-#   - endpoint courant introuvable dans la liste (la liste vient d'être
-#     réécrite par l'agent d'enrôlement) → on repart de la tête ;
+# que porte l'interface. Trois cas particuliers, tous voulus :
+#   - endpoint courant introuvable dans la liste (elle vient d'être réécrite
+#     par l'agent d'enrôlement) → on repart de la tête ;
 #   - liste d'un seul endpoint → on repose le même. `wg set` est idempotent,
 #     et le kit n'a de toute façon nulle part où aller : mieux vaut réarmer
-#     le peer que ne rien faire du tout.
+#     le peer que ne rien faire du tout ;
+#   - DOUBLON dans la liste → le rang se prend à la PREMIÈRE occurrence.
+#     Sinon « courant » et « dernier » coïncident, la rotation renvoie la
+#     tête, et si le doublon EST la tête le kit rebascule indéfiniment sur
+#     l'endpoint mort qu'il vient de quitter. Rien n'interdit un doublon
+#     côté serveur, et le watchdog n'a pas à faire confiance à une liste
+#     qu'il n'écrit pas.
 suivant() { # $1 IP courante (peut être vide)
   awk -v courante="$1" '
-    /^[0-9]/ { n++; ip[n] = $1; if ($1 == courante) index_courant = n }
+    /^[0-9]/ {
+      n++; ip[n] = $1
+      if ($1 == courante && index_courant == "") index_courant = n
+    }
     END {
       if (n == 0) exit 1
       if (index_courant == "" || index_courant == n) print ip[1]
@@ -85,12 +107,26 @@ commuter() {
     return 1
   fi
   # RELU À CHAQUE COMMUTATION, jamais mémorisé (arbitrage N4).
-  _port=51820
+  _port=""
   lisible "$PORT" && _port="$(head -1 "$PORT")"
-  case "$_port" in ''|*[!0-9]*) _port=51820 ;; esac
+  case "$_port" in
+    ''|*[!0-9]*)
+      # BRUYANT, toujours : pendant la fenêtre de double écoute d'une
+      # rotation, la passerelle n'écoute que 51830. Un repli muet sur
+      # 51820 enverrait le kit dans le vide en ayant l'air de travailler.
+      journal "port illisible (« $_port ») — repli sur 51820 (arbitrage N4)"
+      _port=51820 ;;
+  esac
 
   if wg set "$IFACE" peer "$_cle" endpoint "$_cible:$_port"; then
-    journal "bascule : $_ip_courante → $_cible:$_port"
+    if [ "$_cible" = "$_ip_courante" ]; then
+      # Pas une bascule : un ré-armement. Le dire autrement, sinon
+      # l'exploitant cherche dans le journal un basculement qui n'a pas eu
+      # lieu — la liste n'a qu'un endpoint, le kit n'a nulle part où aller.
+      journal "ré-armement du peer sur $_cible:$_port (aucun autre endpoint)"
+    else
+      journal "bascule : $_ip_courante → $_cible:$_port"
+    fi
     return 0
   fi
   journal "échec de la bascule vers $_cible:$_port — nouvel essai au prochain battement"
@@ -108,7 +144,7 @@ while :; do
     # d'abord que l'agent d'enrôlement obtienne une identité. Ce n'est pas
     # une panne, et il n'y a rien à faire basculer.
     journal "$IFACE absente — rien à surveiller pour l'instant"
-  elif ping -c3 -W2 "$CIBLE" >/dev/null 2>&1; then
+  elif ping -c3 -W2 -w10 "$CIBLE" >/dev/null 2>&1; then
     : # le chemin COMPLET répond : rien à faire, et surtout rien à écrire
   else
     journal "$CIBLE muet — le chemin complet est rompu"

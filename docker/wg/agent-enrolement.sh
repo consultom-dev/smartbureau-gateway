@@ -112,7 +112,9 @@ journal() { printf 'wg(agent-enrolement): %s\n' "$*" >&2; }
 # _groupe _rep _tmp` ; `appeler` réserve `_url _ip _rc _hote` ; `tour_usine`
 # réserve `_cle _pub` ; `tour_repoll` réserve `_entree _version _servi` ;
 # `ecrire_wg0` réserve `_cle_wg0` ; `etat_ecrire` réserve `_hs _ep _rendu` ;
-# `deduire_etat` réserve `_memorise`. Les deux fichiers sensibles du bac
+# `deduire_etat` réserve `_memorise` ;
+# `appliquer_config_kit` réserve `_adresse _endpoint` ; `endpoint_courant`
+# réserve `_ep`. Les deux fichiers sensibles du bac
 # (`$CORPS`, `$PORTEUR`) naissent en 600 et meurent avec le `trap`.
 # Une fonction n'écrit JAMAIS dans le préfixe d'une autre — c'est la seule
 # chose qui rende sûr d'appeler l'une depuis l'autre.
@@ -232,6 +234,15 @@ ecrire_wg0() { # $1 adresse/32  $2 clé publique passerelles  $3 endpoint  $4 po
 }
 
 adresse_courante() { sed -n 's/^Address *= *//p' "$WG0" 2>/dev/null | head -1; }
+
+# L'endpoint que porte l'INTERFACE — pas celui de la conf : c'est le
+# watchdog qui l'a posé, et il ne réécrit jamais `wg0.conf`.
+endpoint_courant() {
+  ip link show wg0 >/dev/null 2>&1 || return 0
+  _ep="$(wg show wg0 endpoints 2>/dev/null | awk 'NR==1{print $2}')"
+  case "${_ep:-}" in ''|'(none)') return 0 ;; esac
+  printf '%s\n' "${_ep%:*}"
+}
 
 # À chaud seulement : si wg0 est montée, on resynchronise (jamais down/up —
 # la rotation ne coupe pas le tunnel). Si elle ne l'est pas, on ne monte
@@ -408,12 +419,24 @@ appliquer_config_kit() {
     ecrire_passerelles || return 1
     _adresse="$(adresse_courante)"
     if [ -n "$_adresse" ]; then
+      # L'ENDPOINT COURANT EST PRÉSERVÉ s'il figure encore dans la liste
+      # servie. Reprendre `endpoints[0]` à chaque `200` ramènerait le kit
+      # sur la passerelle nominale et défairait la bascule du watchdog —
+      # or l'architecture §7 promet « les kits restent où ils sont, pas de
+      # retour automatique ». Le rééquilibrage est un acte du serveur, qui
+      # pousse des listes réordonnées, jamais un effet de bord du re-poll.
+      _endpoint="$(endpoint_courant)"
+      if [ -z "$_endpoint" ] \
+         || ! jq -e --arg e "$_endpoint" '.passerelles.endpoints[]? | select(. == $e)' \
+                 "$REPONSE" >/dev/null 2>&1; then
+        _endpoint="$(jq -r '.passerelles.endpoints[0]' "$REPONSE")"
+      fi
       # Une rotation de clé de passerelles (§11.4) n'est qu'un 200 dont
       # `passerelles` a changé : « aucun mécanisme dédié ». On réécrit le
       # [Peer] et on resynchronise — sans jamais redescendre l'interface.
       ecrire_wg0 "$_adresse" \
                  "$(jq -r '.passerelles.cle_publique' "$REPONSE")" \
-                 "$(jq -r '.passerelles.endpoints[0]' "$REPONSE")" \
+                 "$_endpoint" \
                  "$(jq -r '.passerelles.port // 51820' "$REPONSE")" || return 1
       appliquer_wg0
     else
