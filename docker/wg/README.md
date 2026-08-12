@@ -11,8 +11,22 @@ multi-arch, un seul jeu de tests, un condensat identique partout**. Ne
 jamais la re-fragmenter par rôle (annexe 7 §1).
 
 Base Debian slim épinglée : `wireguard-tools`, `iproute2`, `iptables`
-(**backend nf_tables**), `ipset`, `conntrack`. `network_mode: host`,
-`cap_add: [NET_ADMIN, NET_RAW]`.
+(**backend nf_tables** — vérifié au démarrage, refus sinon : piège 9),
+`ipset`, `conntrack`, plus `iputils-ping`, `curl`, `jq` pour le rôle kit.
+`network_mode: host`, `cap_add: [NET_ADMIN, NET_RAW]`.
+
+L'**union** des besoins vit dans l'image unique (annexe 7 §1). Côté kit,
+« pas d'iptables » est une absence d'**usage**, pas de binaire (arbitrage
+Q1, 12/08/2026) : le rôle kit **n'invoque jamais netfilter** — le cas
+R-06 l'atteste statiquement, le NAT et le pare-feu appartiennent à
+`reseau-hote` et `parefeu`.
+
+L'entrypoint aiguille sur `WG_ROLE` (rôle inconnu → refus bruyant) et
+pose deux gardes communes : backend nf_tables, et un `trap` qui redescend
+les interfaces à l'arrêt (pas d'interface orpheline en netns hôte). Les
+scripts de rôle sont sous `roles/` — `commun.sh` (montage idempotent par
+`wg syncconf`, jamais down/up ; mort bruyante si une interface tombe, le
+compose relance).
 
 ## Rôle `passerelle` (lot 4)
 
@@ -55,4 +69,6 @@ NAT** — le serveur est une feuille.
 - **Idempotence** : `iptables -C` puis pose, et une boucle réaffirme —
   Docker et les redémarrages repoussent les règles.
 
-Recette : `tests/netfilter/` (P-01 … P-20) et `tests/agent-enrolement/`.
+Recette : `tests/roles/` (R-01 … R-06, tranche 1 — les trois rôles
+montent), `tests/netfilter/` (P-01 … P-20, lot 4) et
+`tests/agent-enrolement/` (tranche 2).

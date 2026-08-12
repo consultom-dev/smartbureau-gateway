@@ -68,4 +68,15 @@ local). Lots du plan : **2** (image `wg`), **4** (passerelle complète).
 
 ## Commandes
 
-À compléter aux lots 2 et 4 (tests des trois rôles, tests d'agent).
+```bash
+# Le contrat du plan de contrôle, au commit épinglé (refuse un divergent)
+./outillage/recuperer-contrat.sh          # → .contrat/ (jamais versionné)
+
+# L'image unique des trois rôles
+docker build -t consultom/wg:dev docker/wg
+
+# Tranche 1 — les trois rôles montent leurs interfaces (maquette minimale)
+sudo ./tests/roles/lancer.sh              # R-01 … R-06
+
+# À compléter : tests/agent-enrolement (tranche 2), tests/netfilter (lot 4)
+```
