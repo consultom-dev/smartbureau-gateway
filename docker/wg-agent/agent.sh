@@ -64,6 +64,15 @@ case "$LOT_ETAT"  in ''|*[!0-9]*|0) LOT_ETAT=200 ;; esac
 case "$BACKOFF_MAX" in ''|*[!0-9]*) BACKOFF_MAX=300 ;; esac
 case "$DELAI_HTTP"  in ''|*[!0-9]*) DELAI_HTTP=20 ;; esac
 
+# `sort` et `comm` comparent des clés BASE64 (`+`, `/`, `=`). Sous une
+# locale UTF-8, leur collation peut traiter comme égales deux chaînes qui ne
+# diffèrent que par la ponctuation — et un `comm` dont les deux entrées ne
+# sont pas triées dans SON ordre rend n'importe quoi, silencieusement. La
+# `debian:12-slim` n'a pas de locale générée aujourd'hui ; le jour où elle
+# en gagne une, le diff des peers deviendrait non déterministe.
+LC_ALL=C
+export LC_ALL
+
 BAC="$(mktemp -d)"
 REPONSE="$BAC/reponse"
 PORTEUR="$BAC/porteur.conf"
@@ -110,9 +119,18 @@ appliquer_peers() {
     || { journal "table servie illisible — RIEN n'est appliqué, la table en place reste"; return 1; }
   sort < "$BAC/servis.brut" > "$_servis"
   # `wg show <iface> dump` : première ligne = l'interface, puis un peer par
-  # ligne (clé, psk, endpoint, allowed-ips, …).
-  wg show "$IFACE_KITS" dump 2>/dev/null | awk 'NR>1 {print $1, $4}' \
-    | sort > "$_poses"
+  # ligne (clé, psk, endpoint, allowed-ips, …). Commande SÉPARÉE, comme
+  # `jq` plus haut et pour la même raison : en tête de tube, son échec
+  # (interface pas encore montée — couplage lâche §4.1) serait avalé, et
+  # l'agent de passerelle lirait une interface VIDE. Ici la conséquence
+  # serait bénigne — tous les `wg set` échoueraient ensuite, l'application
+  # se déclarerait incomplète — mais une propriété qui tient par accident
+  # ne tient pas.
+  wg show "$IFACE_KITS" dump > "$BAC/dump" 2>/dev/null || {
+    journal "$IFACE_KITS illisible — l'interface n'est pas encore montée, rien n'est appliqué"
+    return 1
+  }
+  awk 'NR>1 {print $1, $4}' < "$BAC/dump" | sort > "$_poses"
 
   _echecs=0 _n=0 _r=0
   # `comm` sur deux fichiers triés : un passage, zéro fork par ligne. Le
@@ -143,8 +161,12 @@ appliquer_peers() {
     fi
   done < "$BAC/a-retirer"
 
-  [ "$_n" -gt 0 ] || [ "$_r" -gt 0 ] \
-    && journal "$_n peer(s) posé(s) ou mis à jour, $_r retiré(s)"
+  # `[ a ] || [ b ] && journal` s'analyse en `(a || b) && journal` : le
+  # résultat voulu, mais par la précédence, pas par l'écriture — et le
+  # composé rendait 1 quand rien n'avait bougé. Un `if` dit ce qu'il fait.
+  if [ "$_n" -gt 0 ] || [ "$_r" -gt 0 ]; then
+    journal "$_n peer(s) posé(s) ou mis à jour, $_r retiré(s)"
+  fi
   # Un `wg set` en échec — l'interface n'existe pas encore, couplage lâche
   # (§4.1) — doit REMONTER : sinon la version serait mémorisée, le tour
   # suivant recevrait un 304, et la table resterait à moitié posée.
@@ -188,8 +210,12 @@ appliquer_ipset() {
 remonter_etat() {
   # Delta depuis le dernier envoi : les peers dont le handshake a bougé.
   _vu="$ETAT/handshakes"
-  wg show "$IFACE_KITS" dump 2>/dev/null \
-    | awk 'NR>1 && $5 > 0 {print $1, $5, $6, $7}' | sort > "$BAC/handshakes" || return 0
+  # Même règle qu'au-dessus : `wg` d'abord, le tube ensuite. Sans
+  # interface, il n'y a rien à remonter — et c'est un retour NEUTRE, pas
+  # une erreur : la remontée d'état est observationnelle.
+  wg show "$IFACE_KITS" dump > "$BAC/dump-etat" 2>/dev/null || return 0
+  awk 'NR>1 && $5 > 0 {print $1, $5, $6, $7}' < "$BAC/dump-etat" \
+    | sort > "$BAC/handshakes" || return 0
   [ -s "$BAC/handshakes" ] || return 0
   if [ -r "$_vu" ]; then
     comm -23 "$BAC/handshakes" "$_vu" > "$BAC/delta"

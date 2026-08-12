@@ -41,10 +41,18 @@
 # entre eux.
 #
 # LE SILENCE ET LE REFUS NE DISENT PAS LA MÊME CHOSE (arbitrage Q9) : (1)
-# est un DROP — un kit n'a pas à apprendre que ses voisins existent — et
-# (6) un REJECT `icmp-admin-prohibited`, parce qu'un kit hors de l'ipset
-# n'est pas en panne, il est NON AUTORISÉ. Sans `--reject-with` explicite,
-# les deux produiraient le même silence (RFC 1122 §4.2.3.9).
+# est un DROP — un kit n'a pas à apprendre que ses voisins existent, il
+# attendra la fin de son délai — et (6) un REJECT `icmp-admin-prohibited`,
+# parce qu'un kit hors de l'ipset n'est pas en panne, il est NON AUTORISÉ.
+#
+# Le `--reject-with` est écrit parce que le MESSAGE doit être juste, pas
+# parce que le refus serait sinon muet : mesuré au lot 4, un REJECT par
+# défaut est déjà immédiat sur du trafic routé. Ce que son défaut
+# (`icmp-port-unreachable`) annonce, en revanche, est une absence de
+# SERVICE — l'exploitant du kit cherchera une panne avant d'apprendre
+# qu'il s'agit d'une décision ; et ce défaut n'est pas le même selon
+# l'outil qui pose la règle. Corollaire : la forme du refus ne s'observe
+# pas au chronomètre, elle se vérifie statiquement (P-01).
 #
 # CE QU'IL NE FAIT PAS : il ne monte aucune interface (c'est le rôle), ne
 # peuple pas l'ipset (c'est l'agent de passerelle, §4.1 — ici on ne fait
@@ -167,6 +175,15 @@ FIN
 # en entrée — tout ce qui le suit est inatteignable. C'est la seule
 # propriété d'ordre qu'un `-C` ne sait pas dire.
 ordre_conforme() {
+  # Le BARRAGE d'abord : c'est le seul objet que ce script pose et qui
+  # n'appartient pas à la séquence. Oublié en place — un `-D` refusé parce
+  # que dockerd tenait le verrou plus de 5 s — il avale TOUT le trafic des
+  # kits, en position 1, et rien ne le voit : les sept règles sont là, le
+  # fourre-tout est toujours dernier, et la sonde reste verte (elle regarde
+  # le DROP kit → kit, qui est intact). Il faut donc le chercher
+  # explicitement, à chaque tour.
+  barrage_present && return 1
+
   _derniere="$($IPT -t filter -S FORWARD 2>/dev/null | grep -e "-i $IFACE_KITS " -e "-o $IFACE_KITS " | tail -n 1)"
   case "$_derniere" in
     *"-i $IFACE_KITS -j REJECT"*) return 0 ;;
@@ -176,16 +193,19 @@ ordre_conforme() {
 
 BARRAGE="-i $IFACE_KITS -j DROP"
 
-barrage_poser() {
+barrage_present() {
   # shellcheck disable=SC2086
-  $IPT -t filter -C FORWARD $BARRAGE 2>/dev/null && return 0
+  $IPT -t filter -C FORWARD $BARRAGE 2>/dev/null
+}
+
+barrage_poser() {
+  barrage_present && return 0
   # shellcheck disable=SC2086
   $IPT -t filter -I FORWARD 1 $BARRAGE
 }
 
 barrage_oter() {
-  # shellcheck disable=SC2086
-  $IPT -t filter -C FORWARD $BARRAGE 2>/dev/null || return 0
+  barrage_present || return 0
   # shellcheck disable=SC2086
   $IPT -t filter -D FORWARD $BARRAGE
 }
@@ -225,7 +245,16 @@ poser() {
   }
   appliquer -D >/dev/null 2>&1        # démontage : les absentes rendent 1, sans importance
   if appliquer -A; then
-    barrage_oter
+    # Le retrait du barrage se VÉRIFIE. Un `-D` refusé (verrou xtables tenu
+    # par dockerd au-delà des 5 s) laisserait la passerelle avec un DROP
+    # `-i wg-kits` en tête : tout le trafic des kits avalé, définitivement,
+    # et aucun contrôle ne s'en apercevrait si `poser` rendait 0 ici.
+    # Rendre 1 fait retenter au cycle suivant, et `ordre_conforme` le
+    # cherche désormais à chaque tour.
+    barrage_oter || {
+      journal "barrage impossible à RETIRER — les kits sont coupés, nouvel essai au prochain cycle"
+      return 1
+    }
     return 0
   fi
   journal "reconstruction incomplète — le barrage RESTE : les kits sont coupés, pas relayés"

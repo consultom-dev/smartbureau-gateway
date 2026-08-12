@@ -88,7 +88,29 @@ verifier() {
   # Il est posé en tête AVANT le démontage — fenêtre fermée, pas ouverte —
   # et retiré une fois la séquence rendue. Oublier de le retirer couperait
   # les kits pour de bon : `-i wg-kits -j DROP` sans `-o` avale tout.
-  nombre_de_regles_est filter FORWARD 0 '^-A FORWARD -i wg-kits -j DROP$'
+  #
+  # ATTENTION AU MOTIF : `_regles_de` retire le préfixe « -A FORWARD » avant
+  # de comparer. Un motif ancré sur `^-A FORWARD ` ne matcherait JAMAIS —
+  # l'assertion serait vraie par construction, barrage présent ou non.
+  regle_absente filter FORWARD -i wg-kits -j DROP
+
+  # --- Cas 4 : le barrage SURVIT à un retrait raté -------------------------
+  # C'est la panne que le barrage lui-même peut produire. `-D` refusé
+  # (dockerd tient le verrou xtables au-delà des 5 s), et il reste en
+  # position 1 : il avale TOUT le trafic des kits. Rien ne le voit
+  # spontanément — les sept règles sont là, le fourre-tout est toujours
+  # dernier, et la sonde reste verte, puisqu'elle regarde le DROP kit → kit,
+  # qui est intact. Le tour suivant doit le trouver et le retirer.
+  ipt -t filter -I FORWARD 1 -i wg-kits -j DROP
+  regle_presente filter FORWARD -i wg-kits -j DROP
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  [ "$CODE" -eq 0 ] || echec "le tour de rattrapage a rendu $CODE : $ERREUR"
+
+  regle_absente filter FORWARD -i wg-kits -j DROP
+  regle_presente filter FORWARD -i wg-kits -o wg-core -j ACCEPT
+  regle_en_position filter FORWARD derniere \
+    -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  nombre_de_regles_est filter FORWARD 6 'wg-'
 }
 
 fin_cas

@@ -20,6 +20,34 @@
 set -eu
 . /usr/local/lib/wg/roles/commun.sh
 
+# Premier démarrage, wg-kits : Vault livre une CLÉ, pas une configuration
+# (annexe 3 §2.4, arbitrage Q12). Celle-ci n'a aucun secret hors la clé et
+# aucune valeur propre au nœud — les N passerelles ont la même — donc elle
+# se rend ici, à partir de `wg-kits.key`. La faire voyager par Vault ferait
+# passer du public par le chemin froid ; la taper sur chaque nœud ferait
+# dépendre 10 000 kits d'un fichier écrit N fois. Sans cette règle, aucune
+# passerelle ne monte : `wg-quick` n'a pas de fichier, et personne n'était
+# chargé de l'écrire.
+if [ ! -f "$WG_CONF/wg-kits.conf" ]; then
+  [ -r "$WG_CONF/wg-kits.key" ] || {
+    journal "wg-kits.conf ET wg-kits.key absents — la clé partagée se tire de Vault au provisionnement (annexe 3 §2.4)"
+    exit 1
+  }
+  umask 077
+  # `Table = off` va avec `Address = 10.200.0.0/16` : sans lui, `wg-quick`
+  # poserait une route /16 vers wg-kits, alors que les /32 des kits
+  # arrivent avec leurs peers (piège 11 de l'architecture).
+  cat > "$WG_CONF/wg-kits.conf" <<CONF
+[Interface]
+Address    = ${WG_KITS_ADRESSE:-10.200.0.0/16}
+ListenPort = ${WG_KITS_PORT:-51820}
+PrivateKey = $(cat "$WG_CONF/wg-kits.key")
+Table      = off
+CONF
+  umask 022
+  journal "wg-kits.conf rendu depuis wg-kits.key (annexe 3 §2.4, arbitrage Q12) — aucun peer : ils arrivent par l'agent de passerelle (§4.1)"
+fi
+
 # Premier démarrage : la paire wg-core naît ici, et la conf est rendue
 # depuis l'environnement (l'endpoint du serveur et l'adresse /32 de CE nœud
 # viennent du provisionnement — lot 4 ; la maquette du lot 2 les fournit).

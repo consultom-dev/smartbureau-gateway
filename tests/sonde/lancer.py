@@ -44,14 +44,28 @@ esac
 exit 0
 """
 
-# `iptables -C` : présent si la règle figure dans $BANC_REGLES.
+# `iptables -C <chaîne> <spec…>` : présent si la SPÉCIFICATION DEMANDÉE
+# figure dans $BANC_REGLES.
+#
+# La doublure répond d'après ce qu'on lui demande, jamais d'après un
+# drapeau du banc. Une doublure qui dirait « vrai » sans regarder ses
+# arguments laisserait passer la mutation la plus intéressante : changer la
+# règle que la sonde contrôle. Elle vérifierait alors n'importe quoi —
+# `-o wg-core -j ACCEPT`, par exemple — en gardant son message d'erreur sur
+# l'invariant 2, et S-05 certifierait le contraire de son titre.
 DOUBLURE_IPTABLES = r"""#!/bin/sh
 echo "iptables $*" >> "$BANC_JOURNAL"
-for a in "$@"; do
-  case "$a" in -C) verif=1 ;; esac
+verif=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -C) verif=1; shift; chaine="$1"; shift; break ;;
+    *)  shift ;;
+  esac
 done
-[ "${verif:-0}" = 1 ] || exit 0
-grep -qF "wg-kits -o wg-kits -j DROP" "$BANC_REGLES" 2>/dev/null
+[ "$verif" = 1 ] || exit 0
+# `-e` OBLIGATOIRE : le motif commence par « -A », que grep prendrait
+# pour son option de contexte.
+grep -qxF -e "-A $chaine $*" "$BANC_REGLES" 2>/dev/null
 """
 
 

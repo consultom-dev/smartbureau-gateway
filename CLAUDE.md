@@ -92,8 +92,8 @@ sudo SMARTBUREAU_SERVER=/chemin/vers/smartbureau-server \
 SMARTBUREAU_SERVER=… /chemin/vers/smartbureau-server/outillage/lint/lint.sh
 
 # Lot 4 — la passerelle complète
-sudo SMARTBUREAU_SERVER=… ./tests/netfilter/lancer.sh           # P-01 … P-06
-SMARTBUREAU_SERVER=… ./tests/agent-passerelle/lancer.py         # G-01 … G-10
+sudo SMARTBUREAU_SERVER=… ./tests/netfilter/lancer.sh           # P-01 … P-08
+SMARTBUREAU_SERVER=… ./tests/agent-passerelle/lancer.py         # G-01 … G-11
 ./tests/sonde/lancer.py                                         # S-01 … S-06
 ./tests/configuration/lancer.py                                 # C-01 … C-08
 

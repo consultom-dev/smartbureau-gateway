@@ -36,5 +36,23 @@ re-poller.
 - **La surcharge `api.` vit dans le compose** (`extra_hosts`) — ce
   conteneur en a besoin comme l'agent de passerelle.
 
-Recette : cas **P-17** (deux routes, tout le reste en 404, corps borné) et
-**P-18** (wg-core abattue → le proxy répond toujours).
+## Recette — ce qui est tenu, et ce qui ne l'est pas
+
+**Tenu, en statique** : `C-04` (deux routes exactes et rien d'autre —
+compte brut des `location`, quel que soit leur modificateur ; aucune route
+ACME ; pas de port 80), `C-05` (corps borné à 32 Ko, débit limité, aucun
+corps journalisé, TLS amont vérifié), `C-06` (l'entrypoint est **exécuté**
+sans son wildcard et doit refuser de démarrer).
+
+**Pas tenu** : les deux moitiés dynamiques de l'invariant 9 — le 404
+réellement **servi** par un nginx qui tourne, et le proxy **vivant wg-core
+morte**. Le catalogue du gabarit les prévoit en `P-17` et `P-18` ; ils ne
+sont pas écrits. En attendant, aucun banc ne démarre ce nginx : une erreur
+de syntaxe ne se verrait qu'au déploiement. Sur une machine avec Docker,
+au moins une fois par changement de ce fichier :
+
+```bash
+docker build -t consultom/proxy-enrolement:dev docker/proxy-enrolement
+docker run --rm -e NOM=gw-01.gateway.test -e API=https://api.server.test \
+  -v /tmp/tls:/etc/proxy/tls:ro consultom/proxy-enrolement:dev nginx -t
+```

@@ -16,7 +16,9 @@
 
 import os
 import re
+import subprocess
 import sys
+import tempfile
 
 ICI = os.path.dirname(os.path.abspath(__file__))
 RACINE = os.path.dirname(os.path.dirname(ICI))
@@ -53,15 +55,50 @@ def sans_commentaires(texte):
     return "\n".join(l for l in texte.splitlines() if not l.lstrip().startswith("#"))
 
 
+# Les entrées de TOUS les blocs `volumes:` du compose — forme en liste
+# comme forme en ligne. Chercher « - quelque-chose: » à la volée ramasse
+# aussi les variables d'environnement (`- API=https://…`), et un motif
+# rétréci pour les éviter finit par ne plus voir que les binds `./…` :
+# c'est ainsi qu'un volume NOMMÉ passe inaperçu.
+def montages_du_compose(texte):
+    lignes, trouves, dedans, marge = texte.splitlines(), [], False, 0
+    for ligne in lignes:
+        nue = ligne.strip()
+        if not nue:
+            continue
+        indent = len(ligne) - len(ligne.lstrip())
+        if re.match(r"^volumes:\s*$", nue):
+            dedans, marge = True, indent
+            continue
+        entree = re.match(r"^volumes:\s*\[(.*)\]\s*$", nue)
+        if entree:
+            trouves += [e.strip().strip('"\'').split(":")[0]
+                        for e in entree.group(1).split(",") if e.strip()]
+            continue
+        if dedans:
+            if nue.startswith("- ") and indent > marge:
+                trouves.append(nue[2:].strip().strip('"\'').split(":")[0])
+                continue
+            dedans = False
+    return trouves
+
+
 try:
     # =========================================================================
     r.cas("C-01 — sans état : aucun volume de données dans le compose",
           "annexe 3 §7 ; doctrine « la panne se répare en redéployant »")
-    volumes = re.findall(r"^\s+- (\./[^:]+):", COMPOSE, re.M)
-    r.verifier(sorted(set(volumes)) == ["./tls", "./wg"],
+    # TOUS les montages, pas seulement les binds `./…` : un volume NOMMÉ
+    # (`- etat-agent:/var/lib/wg-agent`) est exactement la donnée de valeur
+    # que la doctrine interdit, et un motif qui n'accepte que `./` ne le
+    # voit pas.
+    montages = montages_du_compose(sans_commentaires(COMPOSE))
+    r.verifier(sorted(set(montages)) == ["./tls", "./wg"],
                "les deux seuls montages portent des secrets tirés de Vault — "
-               "aucune donnée de valeur, donc rien à restaurer", volumes)
-    r.verifier("volumes:" not in COMPOSE.split("services:")[0],
+               "aucune donnée de valeur, donc rien à restaurer", montages)
+    # Le bloc `volumes:` de niveau supérieur se met par convention EN FIN de
+    # fichier : le chercher dans l'en-tête ne prouvait rien. On le cherche
+    # en colonne 0, où qu'il soit.
+    r.verifier(not re.search(r"^volumes:", sans_commentaires(COMPOSE), re.M),
                "et aucun volume nommé déclaré au niveau supérieur")
     r.verifier(":ro" in service("enrolement-proxy"),
                "le certificat est monté en lecture seule")
@@ -95,10 +132,19 @@ try:
     # =========================================================================
     r.cas("C-04 — le proxy d'enrôlement : deux routes, et RIEN d'autre",
           "annexe 3 §5 ; §8 invariant 9")
-    emplacements = re.findall(r"location\s+(=?\s*\S+)\s*\{", NGINX)
-    r.verifier(sorted(e.replace(" ", "") for e in emplacements)
+    # EXHAUSTIF : tout ce qui suit `location`, modificateur compris. Un
+    # motif qui n'accepterait que `location <mot> {` et `location = <mot> {`
+    # laisserait passer `location ~ ^/tout { … }` — une troisième route,
+    # invisible, sur le seul service publiquement exposé du nœud.
+    emplacements = re.findall(r"^\s*location\s+([^{]+?)\s*\{",
+                              sans_commentaires(NGINX), re.M)
+    r.verifier(sorted(re.sub(r"\s+", "", e) for e in emplacements)
                == ["/", "=/config-kit", "=/enroler"],
                "exactement deux routes exactes, plus le fourre-tout", emplacements)
+    r.verifier(len(re.findall(r"\blocation\b", sans_commentaires(NGINX))) == 3,
+               "et TROIS `location` dans le fichier, pas un de plus — le compte "
+               "brut, qu'aucune forme de modificateur ne contourne",
+               re.findall(r"^.*\blocation\b.*$", sans_commentaires(NGINX), re.M))
     r.verifier("return 404" in NGINX,
                "et le fourre-tout rend un 404 sec — pas de page bavarde")
     nginx_nu = sans_commentaires(NGINX).lower()
@@ -121,8 +167,15 @@ try:
     r.verifier("limit_req_status 429" in NGINX, "et un 429 explicite")
     r.verifier("access_log" in NGINX and "$request_body" not in NGINX,
                "aucune journalisation de corps : les secrets y transitent")
-    r.verifier("proxy_ssl_verify" in RELAIS and " on;" in RELAIS,
-               "le relais vers le plan de contrôle vérifie le TLS amont")
+    # UNE SEULE chaîne : « proxy_ssl_verify » d'un côté et « on; » de
+    # l'autre étaient deux moitiés indépendantes — `proxy_ssl_server_name
+    # on;`, deux lignes plus haut, satisfaisait la seconde, et
+    # `proxy_ssl_verify off;` passait. Le proxy relaierait alors le
+    # `POST /enroler` — la requête qui porte le secret d'usine — sans
+    # vérifier la chaîne du plan de contrôle.
+    r.verifier(re.search(r"proxy_ssl_verify\s+on\s*;", sans_commentaires(RELAIS)),
+               "le relais vers le plan de contrôle vérifie le TLS amont",
+               [l for l in RELAIS.splitlines() if "proxy_ssl" in l])
     r.verifier("X-Forwarded-For" in RELAIS,
                "et l'IP source du kit remonte — l'app en a besoin pour les "
                "rafales d'enrôlements échoués (annexe 4 §5)")
@@ -133,10 +186,18 @@ try:
           "annexe 3 §8 invariant 10")
     r.verifier("gateway.crt" in ENTREE_PROXY and "gateway.key" in ENTREE_PROXY,
                "l'entrypoint vérifie les deux fichiers")
-    r.verifier("exit 1" in ENTREE_PROXY,
-               "et REFUSE de démarrer s'ils manquent — un proxy qui écoute "
-               "sans pouvoir servir ferme l'enrôlement ET le re-poll de toute "
-               "la flotte servie, en ayant l'air vivant")
+    # « un `exit 1` quelque part » ne prouve rien : il faut que le REFUS
+    # soit attaché au CONTRÔLE des deux fichiers. On exécute donc
+    # l'entrypoint sans eux, et on regarde ce qu'il fait.
+    r.verifier(subprocess.run(
+        ["sh", os.path.join(RACINE, "docker", "proxy-enrolement", "entrypoint.sh")],
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+             "NOM": "gw-01.gateway.test", "API": "https://api.server.test",
+             "TLS": os.path.join(tempfile.mkdtemp(), "vide")},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30).returncode != 0,
+        "et REFUSE de démarrer s'ils manquent — un proxy qui écoute "
+        "sans pouvoir servir ferme l'enrôlement ET le re-poll de toute "
+        "la flotte servie, en ayant l'air vivant")
     r.fin("C-06 wildcard obligatoire")
 
     # =========================================================================
@@ -169,6 +230,22 @@ try:
                "mode strict jette les retours légitimes sans trace")
     r.verifier("--dport 80" not in PROVISIONNEMENT,
                "et le pare-feu public n'ouvre pas le port 80")
+    # Le pare-feu se POSE (arbitrage Q13). Le prouver ici tiendrait du
+    # `grep` — c'est P-08 qui l'exécute en netns — mais deux propriétés du
+    # SCRIPT se lisent, et elles ont coûté cher : que la pose soit une
+    # commande, et que le `.env` ne passe pas le secret par un `sed`.
+    r.verifier(re.search(r"\$IPT\s+-A INPUT", PROVISIONNEMENT),
+               "les règles sont POSÉES par une commande, pas imprimées — une "
+               "procédure de sécurité qui rend 0 sans avoir agi produit une "
+               "confiance (arbitrage Q13 ; l'effet est tenu par P-08)")
+    r.verifier(not re.search(r'sed[^\n]*AGENT_SECRET=\$AGENT_SECRET', PROVISIONNEMENT),
+               "et le secret d'agent n'est pas injecté par un `sed` : un `&` "
+               "ou un `\\` dans le secret produirait un `.env` FAUX, sans "
+               "erreur — et le nœud prendrait des 401 indéfiniment")
+    r.verifier("modprobe nf_conntrack" in PROVISIONNEMENT,
+               "`nf_conntrack` est chargé avant `sysctl -p` : ses clés "
+               "n'existent pas tant que le module ne l'est pas, et sur une VM "
+               "neuve le script sortirait avant d'écrire le `.env`")
     r.fin("C-08 provisionnement")
 
 finally:

@@ -17,6 +17,7 @@
 #            SMARTBUREAU_SERVER=/chemin/vers/smartbureau-server ./tests/…
 # =============================================================================
 
+import http.server
 import json
 import os
 import shutil
@@ -25,6 +26,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -82,6 +84,46 @@ DOUBLURE_IPTABLES = r"""#!/bin/sh
 echo "IPTABLES-APPELE $*" >> "$BANC_JOURNAL"
 exit 0
 """
+
+
+class Enregistreur:
+    """Un plan de contrôle minimal qui CONSERVE les corps reçus.
+
+    Le mock, lui, ignore les kits qu'il ne connaît pas : il ne peut pas dire
+    ce que l'agent de passerelle a réellement envoyé pour des peers
+    synthétiques. Or c'est exactement ce que l'arbitrage A8 demande de
+    vérifier — l'UNION des requêtes, pas leur nombre. Compter trois envois
+    et trois `204` laisse passer une troncature qui répète le même lot.
+    """
+
+    def __init__(self):
+        self.port = port_libre()
+        self.corps = []
+        enregistreur = self
+
+        class Poignee(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):                                   # noqa: N802
+                self.send_response(304)
+                self.end_headers()
+
+            def do_POST(self):                                  # noqa: N802
+                taille = int(self.headers.get("Content-Length", 0))
+                enregistreur.corps.append(json.loads(self.rfile.read(taille)))
+                self.send_response(204)
+                self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        self.serveur = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), Poignee)
+        self.fil = threading.Thread(target=self.serveur.serve_forever, daemon=True)
+        self.fil.start()
+
+    def cles_recues(self):
+        return sorted({k["cle_publique"] for c in self.corps for k in c.get("kits", [])})
+
+    def arreter(self):
+        self.serveur.shutdown()
 
 
 def port_libre():
@@ -253,7 +295,8 @@ def prerequis():
 NOMS = ["G-01 premier pull", "G-02 304", "G-03 diff sur wg show",
         "G-04 401 ne purge rien", "G-05 API morte", "G-06 etat-tunnels",
         "G-07 fractionnement", "G-08 aucune clé, aucune règle",
-        "G-09 version après application", "G-10 ipset d'un autre"]
+        "G-09 version après application", "G-10 ipset d'un autre",
+        "G-11 retrait d'ipset"]
 
 MOTIF = prerequis()
 if MOTIF:
@@ -296,14 +339,18 @@ try:
     r.cas("G-02 — 304 : rien à faire, et rien n'est fait",
           "annexe 3 §4.1")
     avant = (banc.peers(base), banc.ipset(base))
+    appels_avant = len(banc.appels(base))
     marque = banc.marque_trace()
     banc.agent(base, tours=1)
     appels = banc.requetes_depuis(marque, "/peers")
     r.verifier(appels and "-> 304" in appels[0], "le pull suivant est un 304", appels)
     r.verifier((banc.peers(base), banc.ipset(base)) == avant,
                "aucun peer touché, aucune entrée d'ipset touchée")
-    r.verifier(not any(a.startswith("wg set") for a in banc.appels(base)[-5:]),
-               "et aucun `wg set` émis")
+    # Une fenêtre de position, pas « les cinq dernières lignes » : le tour
+    # émet déjà cinq à six appels, et un `wg set` parasite émis en début de
+    # tour sortirait de la fenêtre dès que la table servie grandit.
+    r.verifier(not any(a.startswith("wg set") for a in banc.appels(base)[appels_avant:]),
+               "et aucun `wg set` émis", banc.appels(base)[appels_avant:])
     r.fin("G-02 304")
 
     # =========================================================================
@@ -428,12 +475,30 @@ try:
     # convergence — qui a raison — retirerait ces 450 peers que le serveur
     # ne sert pas, avant même de lire leurs handshakes.
     os.remove(os.path.join(base7, "etat", "peers.json"))
-    marque = banc.marque_trace()
-    acheve = banc.agent(base7, tours=1)
-    envois = banc.requetes_depuis(marque, "/etat-tunnels")
+
+    # On envoie vers un ENREGISTREUR, pas vers le mock : la seule assertion
+    # qui tienne l'arbitrage A8 porte sur l'UNION des corps. Compter les
+    # requêtes ne suffit pas — trois envois du MÊME lot de 200 donneraient
+    # trois requêtes, trois 204, un journal qui dit « fractionné », et 250
+    # kits vivants comptés comme silencieux.
+    enregistreur = Enregistreur()
+    try:
+        acheve = banc.agent(base7, tours=1,
+                            extra={"API": "http://127.0.0.1:%d" % enregistreur.port})
+        envois = list(enregistreur.corps)
+        cles = enregistreur.cles_recues()
+    finally:
+        enregistreur.arreter()
+
     r.verifier(len(envois) >= 3,
                "450 lignes partent en PLUSIEURS requêtes (lot de 200)", len(envois))
-    r.verifier(all("-> 204" in e for e in envois), "toutes acceptées", envois)
+    r.verifier(all(len(c.get("kits", [])) <= 200 for c in envois),
+               "aucune requête ne dépasse le lot", [len(c.get("kits", [])) for c in envois])
+    r.verifier(len(cles) == 450,
+               "et LES 450 KITS sont remontés — l'union des corps, pas leur nombre",
+               "%d clé(s) distincte(s) reçue(s)" % len(cles))
+    r.verifier(cles[0] == "CLE-KIT-001=" and cles[-1] == "CLE-KIT-450=",
+               "du premier au dernier, sans trou aux bornes", (cles[0], cles[-1]))
     r.verifier("fractionné" in acheve.stderr.decode(),
                "et l'agent de passerelle le dit — un état tronqué ferait compter "
                "des kits vivants comme silencieux", acheve.stderr.decode()[-300:])
@@ -514,6 +579,42 @@ try:
                "et l'agent de passerelle le signale, plutôt que de la créer",
                acheve.stderr.decode()[-300:])
     r.fin("G-10 ipset d'un autre")
+
+    # =========================================================================
+    r.cas("G-11 — le drapeau `internet` retiré RETIRE de l'ipset",
+          "annexe 3 §4.1 ; §8 invariant 1 ; annexe 1 §4.6 (A8)")
+    # Le sens de marche que personne ne testait. Tous les autres cas partent
+    # d'une ipset vide : la boucle de RETRAIT n'y est jamais entrée, et la
+    # supprimer entièrement les laissait tous verts.
+    #
+    # La panne, elle, est opposable : un exploitant retire l'autorisation
+    # internet d'un kit (`POST /kits/A0009/internet {"internet": false}`),
+    # la version de /peers change, l'agent de passerelle tire la nouvelle
+    # table — et le /32 resterait dans `internet_ok` POUR TOUJOURS. Le kit
+    # continuerait de sortir sur Internet par la passerelle alors que la
+    # décision a été retirée. L'ipset est le seul verrou de niveau 2
+    # opposable au terrain (arch. §5.1) : s'il ne se referme pas, il ne
+    # vaut rien.
+    base11 = banc.sable("g11", peers=[], ipset=[])
+    banc.agent(base11, tours=1)
+    r.verifier(banc.ipset(base11) == ["10.200.0.9"],
+               "au départ, le kit autorisé est dans l'ipset", banc.ipset(base11))
+
+    banc.admin("POST", "/kits/A0009/internet", {"internet": False})
+    banc.agent(base11, tours=1)
+    r.verifier(banc.ipset(base11) == [],
+               "l'autorisation retirée, le /32 SORT de l'ipset", banc.ipset(base11))
+    r.verifier(dict(banc.peers(base11)).get(CLE_A0009) == "10.200.0.9/32",
+               "et son peer reste posé : perdre Internet n'est pas perdre le tunnel",
+               banc.peers(base11))
+
+    # Et la réciproque, sinon on ne saurait pas si l'agent de passerelle
+    # sait encore ajouter après avoir retiré.
+    banc.admin("POST", "/kits/A0009/internet", {"internet": True})
+    banc.agent(base11, tours=1)
+    r.verifier(banc.ipset(base11) == ["10.200.0.9"],
+               "rendue, elle le remet", banc.ipset(base11))
+    r.fin("G-11 retrait d'ipset")
 
 finally:
     banc.arreter()
