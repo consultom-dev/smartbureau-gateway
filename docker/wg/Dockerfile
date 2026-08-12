@@ -46,9 +46,14 @@ COPY roles/ /usr/local/lib/wg/roles/
 # Les trois processus du rôle kit sont voisins de `roles/` — ils sourcent
 # `roles/commun.sh` par un chemin RELATIF, le même dans l'image et dans le
 # dépôt (annexe 2 §3.2, §3.3, §3.4).
-COPY agent-enrolement.sh watchdog.sh marqueurs.sh /usr/local/lib/wg/
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/lib/wg/roles/*.sh \
+COPY agent-enrolement.sh watchdog.sh marqueurs.sh \
+     netfilter-passerelle.sh /usr/local/lib/wg/
+# La sonde est appelée par le healthcheck du compose : elle va dans le PATH.
+COPY sonde.sh /usr/local/bin/sonde.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/sonde.sh \
+             /usr/local/lib/wg/roles/*.sh \
              /usr/local/lib/wg/agent-enrolement.sh \
-             /usr/local/lib/wg/watchdog.sh /usr/local/lib/wg/marqueurs.sh
+             /usr/local/lib/wg/watchdog.sh /usr/local/lib/wg/marqueurs.sh \
+             /usr/local/lib/wg/netfilter-passerelle.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

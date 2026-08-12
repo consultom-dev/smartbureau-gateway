@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# cas/P-03-hub-and-spoke-et-sortie-internet.cas
+#
+# Les trois invariants qui ne se prouvent qu'avec des paquets RÉELS :
+#
+#   - deux kits enrôlés ne se joignent pas à travers la passerelle
+#     (invariant 2) — et c'est le DROP qui le tranche, pas les AllowedIPs,
+#     pas le fourre-tout : le compteur dit LAQUELLE des deux règles a agi ;
+#   - un kit hors de l'ipset ne sort pas vers Internet, un kit dedans sort
+#     (invariant 1) — l'ipset plafonne, elle n'aiguille pas ;
+#   - le chemin autorisé, lui, passe.
+#
+# Une assertion statique ne prouverait rien de tout cela : elle constate
+# qu'une règle est écrite, pas qu'elle tranche.
+
+set -euo pipefail
+. "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
+
+cas "P-03" "Paquets réels : kit ↔ kit refusé, kit → cœur permis, internet par ipset" \
+    --source "annexe 3 §3.2 ; annexe 3 §8 invariants 1 et 2 ; arbitrage Q9" \
+    --lot 4 \
+    --exige injection
+
+preparer() {
+  banc_creer p03
+  banc_role passerelle
+  banc_pair kitA    --sur wg-kits --adresse 10.200.0.5/32 --via 10.200.0.1
+  banc_pair kitB    --sur wg-kits --adresse 10.200.0.6/32 --via 10.200.0.1
+  banc_pair serveur --sur wg-core --adresse 10.100.0.1/32 --via 10.100.0.2
+  banc_pair internet --sur eth0   --adresse 203.0.113.9/24 --via 203.0.113.2
+
+  service_ecoute kitB     8080
+  service_ecoute serveur  8443
+  service_ecoute internet 8000
+}
+
+agir() {
+  env_config IFACES_PUBLIQUES=eth0
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  # C'est l'agent de passerelle qui peuple l'ipset depuis le drapeau
+  # `internet` de /peers (§4.1) : ici on tient sa place, kitA autorisé.
+  dans_sut ipset add internet_ok 10.200.0.5 -exist
+}
+
+verifier() {
+  [ "$CODE" -eq 0 ] || echec "la pose a rendu $CODE : $ERREUR"
+
+  # --- Le chemin autorisé passe --------------------------------------------
+  joignable kitA 10.100.0.1 8443
+  joignable kitB 10.100.0.1 8443
+
+  # --- kit ↔ kit refusé, EN SILENCE, et c'est le DROP qui tranche ----------
+  compteurs_raz
+  rejete kitA 10.200.0.6 8080 --silencieux --delai 2
+  compteur_non_nul filter FORWARD 'DROP'
+
+  # --- La sortie internet : l'ipset PLAFONNE (invariant 1) -----------------
+  # kitA y est : il sort. kitB n'y est pas : il ne sort pas, quelle que
+  # soit la configuration de SON parefeu — c'est ce qui rend la
+  # restriction opposable.
+  ipset_contient        internet_ok 10.200.0.5
+  ipset_ne_contient_pas internet_ok 10.200.0.6
+  joignable kitA 203.0.113.9 8000
+  rejete    kitB 203.0.113.9 8000 --delai 3
+
+  # Le refus de kitB est celui du fourre-tout, pas du DROP entre kits.
+  compteurs_raz
+  rejete kitB 203.0.113.9 8000 --delai 3
+  compteur_non_nul filter FORWARD 'REJECT'
+
+  # --- Retirer de l'ipset referme, sans toucher à une seule règle ----------
+  dans_sut ipset del internet_ok 10.200.0.5
+  rejete kitA 203.0.113.9 8000 --delai 3
+  dans_sut ipset add internet_ok 10.200.0.5 -exist
+  joignable kitA 203.0.113.9 8000
+}
+
+fin_cas

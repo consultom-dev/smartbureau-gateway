@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# cas/P-04-deux-verrous-distincts.cas
+#
+# `FORWARD` et `INPUT` sont deux verrous, pas deux écritures du même
+# (invariant 4). Le premier borne ce qu'un kit TRAVERSE, le second ce
+# qu'il ATTEINT sur la passerelle. N'en poser qu'un laisse l'autre chemin
+# ouvert — et le pare-feu public du nœud ne le rattrape pas : il raisonne
+# sur l'interface publique, pas sur wg-kits.
+
+set -euo pipefail
+. "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
+
+cas "P-04" "Un kit n'atteint pas les services de la passerelle elle-même" \
+    --source "annexe 3 §3.2 ; annexe 3 §8 invariant 4" \
+    --lot 4 \
+    --exige injection
+
+preparer() {
+  banc_creer p04
+  banc_role passerelle
+  banc_pair kitA --sur wg-kits --adresse 10.200.0.5/32 --via 10.200.0.1
+  # Un service DE LA PASSERELLE, sur son adresse wg-kits : le proxy
+  # d'enrôlement, une sonde, un ssh mal fermé — peu importe lequel.
+  dans_sut sh -c 'nohup nc -l -k -p 9999 >/dev/null 2>&1 &' || true
+  sleep 1
+}
+
+agir() {
+  env_config IFACES_PUBLIQUES=eth0
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+}
+
+verifier() {
+  [ "$CODE" -eq 0 ] || echec "la pose a rendu $CODE : $ERREUR"
+
+  regle_presente filter INPUT   -i wg-kits -j REJECT
+  regle_presente filter FORWARD -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+
+  # Le service local est injoignable depuis un kit : c'est INPUT qui le dit.
+  compteurs_raz
+  rejete kitA 10.200.0.1 9999 --delai 3
+  compteur_non_nul filter INPUT 'REJECT'
+
+  # La démonstration négative : sans le verrou INPUT, le fourre-tout de
+  # FORWARD ne rattrape RIEN — le trafic à destination locale ne traverse
+  # pas FORWARD. C'est là qu'on voit que les deux verrous sont deux.
+  ipt -t filter -D INPUT -i wg-kits -j REJECT
+  joignable kitA 10.200.0.1 9999
+  ipt -t filter -A INPUT -i wg-kits -j REJECT
+  rejete kitA 10.200.0.1 9999 --delai 3
+}
+
+fin_cas

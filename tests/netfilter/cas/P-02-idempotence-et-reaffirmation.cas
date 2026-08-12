@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# cas/P-02-idempotence-et-reaffirmation.cas
+#
+# La pose est idempotente, et la boucle rattrape ce que docker repousse.
+# C'est la propriété qui permet de redémarrer un conteneur, de rejouer un
+# `wg-quick` à la main, ou de laisser dockerd réécrire ses chaînes, sans
+# jamais accumuler de doublon ni perdre une règle.
+
+set -euo pipefail
+. "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
+
+cas "P-02" "Poser trois fois ne pose qu'une fois ; la boucle rattrape une règle effacée" \
+    --source "annexe 3 §3.2 (réaffirmation 30 s) ; annexe 3 §8 invariant 8" \
+    --lot 4
+
+preparer() {
+  banc_creer p02
+  banc_role passerelle
+}
+
+agir() {
+  env_config IFACES_PUBLIQUES=eth0
+  executer_en_boucle "$SUJET/docker/wg/netfilter-passerelle.sh" --cycles 3
+}
+
+verifier() {
+  [ "$CODE" -eq 0 ] || echec "la pose a rendu $CODE : $ERREUR"
+
+  # Trois poses, une seule règle de chaque : c'est le `-C` avant le `-A`.
+  # (`proprietaire_unique` prend un MOTIF, pas une spécification.)
+  proprietaire_unique filter FORWARD 'wg-kits -o wg-kits -j DROP'
+  proprietaire_unique filter FORWARD 'wg-kits -j REJECT'
+  proprietaire_unique filter INPUT   'wg-kits -j REJECT'
+  proprietaire_unique nat POSTROUTING 'wg-core -j MASQUERADE'
+  nombre_de_regles_est filter FORWARD 6 'wg-'
+
+  # Quelqu'un efface l'isolation — dockerd qui réécrit, un exploitant qui
+  # « nettoie ». Le tour suivant la remet, sans rien dupliquer d'autre.
+  ipt -t filter -D FORWARD -i wg-kits -o wg-kits -j DROP
+  regle_absente filter FORWARD -i wg-kits -o wg-kits -j DROP
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  regle_presente filter FORWARD -i wg-kits -o wg-kits -j DROP
+  proprietaire_unique filter FORWARD 'wg-kits -j REJECT'
+  nombre_de_regles_est filter FORWARD 6 'wg-'
+
+  # ... mais elle revient EN QUEUE : le fourre-tout n'est plus dernier.
+  # C'est le prix d'une réaffirmation par `-A`, et il est acceptable — la
+  # règle rétablie DROP kit→kit, que le fourre-tout aurait de toute façon
+  # rejeté. L'ordre nominal se retrouve au redémarrage du conteneur.
+  regle_presente filter FORWARD -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+}
+
+fin_cas

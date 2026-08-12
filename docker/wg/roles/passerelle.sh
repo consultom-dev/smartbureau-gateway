@@ -1,7 +1,6 @@
 #!/bin/sh
 # =============================================================================
-# Rôle PASSERELLE — au lot 2 : les INTERFACES seules (annexe 3 §3.2, deux
-# premières lignes ; l'isolation, le NAT, l'ipset et la sonde sont lot 4).
+# Rôle PASSERELLE — les interfaces, puis les RÈGLES (annexe 3 §3.2).
 #
 #   wg-kits : clé PARTAGÉE de la flotte (tirée de Vault, montée en 600 —
 #             JAMAIS générée ici), Address 10.200.0.0/16 (la route de
@@ -43,11 +42,35 @@ AllowedIPs          = 10.100.0.0/24
 PersistentKeepalive = 25
 CONF
   umask 022
-  echo "wg(passerelle): paire wg-core née (premier démarrage, annexe 3 §2.4) — publique dans wg-core.pub, à déclarer (§6.1)" >&2
+  journal "paire wg-core née (premier démarrage, annexe 3 §2.4) — publique dans wg-core.pub, à déclarer (§6.1)"
 fi
 
-trap 'descendre wg-core wg-kits; exit 0' TERM INT
+NETFILTER="/usr/local/lib/wg/netfilter-passerelle.sh"
+PIDS=""
+
+arreter() {
+  for p in $PIDS; do kill -TERM "$p" 2>/dev/null || true; done
+  # Laisser la boucle retirer SES règles avant de descendre les interfaces :
+  # l'inverse laisserait des règles orphelines référençant des interfaces
+  # disparues, que le prochain démarrage retrouverait sans les reconnaître.
+  [ -n "$PIDS" ] && sleep 1
+  descendre wg-core wg-kits
+  exit 0
+}
+trap arreter TERM INT
+
 monter wg-kits
 monter wg-core
-echo "wg(passerelle): wg-kits (51820) et wg-core montées — les règles arrivent au lot 4" >&2
+journal "wg-kits (51820) et wg-core montées"
+
+# Les règles APRÈS les interfaces : `-i wg-kits` sur une interface absente
+# est refusé par netfilter. La boucle réaffirme toutes les 30 s — docker et
+# les redémarrages repoussent les règles — et retire tout à l'arrêt.
+if [ -x "$NETFILTER" ]; then
+  "$NETFILTER" --boucle &
+  PIDS="$PIDS $!"
+else
+  journal "ATTENTION : $NETFILTER absent — la passerelle n'a AUCUNE règle"
+fi
+
 tenir wg-kits wg-core

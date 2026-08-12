@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# cas/P-01-regles-posees-dans-l-ordre.cas
+#
+# Ce que pose la passerelle à froid, et DANS QUEL ORDRE. L'ordre n'est pas
+# une élégance : avec une pose en `-I`, le REJECT fourre-tout passerait
+# devant l'ACCEPT vers wg-core et la passerelle couperait toute la flotte
+# qu'elle sert — sans qu'une seule règle soit fausse prise isolément.
+# C'est l'arbitrage Q8, et c'est ce cas qui le tient.
+
+set -euo pipefail
+. "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
+
+cas "P-01" "À froid : les sept règles de l'annexe 3 §3.2, dans l'ordre" \
+    --source "annexe 3 §3.2 ; annexe 3 §8 invariants 2 et 4 ; arbitrages Q8 et Q9" \
+    --lot 4
+
+preparer() {
+  banc_creer p01
+  banc_role passerelle
+}
+
+agir() {
+  env_config IFACES_PUBLIQUES=eth0
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+}
+
+verifier() {
+  [ "$CODE" -eq 0 ] || echec "la pose a rendu $CODE : $ERREUR"
+
+  # --- Les sept règles ------------------------------------------------------
+  regle_presente filter FORWARD -i wg-kits -o wg-kits -j DROP
+  regle_presente filter FORWARD -i wg-kits -o wg-core -j ACCEPT
+  regle_presente filter FORWARD -i wg-core -o wg-kits -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  regle_presente filter FORWARD -i wg-kits -o eth0 -m set --match-set internet_ok src -j ACCEPT
+  regle_presente filter FORWARD -i eth0 -o wg-kits -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+  regle_presente filter FORWARD -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  regle_presente filter INPUT   -i wg-kits -j REJECT
+  regle_presente nat POSTROUTING -o wg-core -j MASQUERADE
+  regle_presente nat POSTROUTING -s 10.200.0.0/16 -o eth0 -j MASQUERADE
+
+  # --- L'ORDRE (arbitrage Q8) ----------------------------------------------
+  # Le fourre-tout est en DERNIER. Toute la politique tient à cela : les
+  # trois ACCEPT doivent être évalués avant lui, sinon ils ne servent à rien.
+  regle_en_position filter FORWARD derniere -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  regle_avant filter FORWARD \
+    -i wg-kits -o wg-core -j ACCEPT \
+    -- -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  regle_avant filter FORWARD \
+    -i wg-kits -o eth0 -m set --match-set internet_ok src -j ACCEPT \
+    -- -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  # Et le DROP entre kits précède TOUT le reste : c'est lui qui doit
+  # trancher un kit → kit, pas le fourre-tout (leurs effets diffèrent, Q9).
+  regle_avant filter FORWARD \
+    -i wg-kits -o wg-kits -j DROP \
+    -- -i wg-kits -o wg-core -j ACCEPT
+
+  # --- L'ipset existe, et elle est VIDE ------------------------------------
+  # Le conteneur `wg` la crée ; c'est l'agent de passerelle qui la peuple
+  # (annexe 3 §4.1). Sans elle, la règle `-m set` ne se poserait pas et le
+  # fail-closed deviendrait un fail-open silencieux.
+  ipset_existe internet_ok
+  ipset_ne_contient_pas internet_ok 10.200.0.5
+}
+
+fin_cas
