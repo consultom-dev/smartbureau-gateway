@@ -6,10 +6,10 @@
 #   - wg0 : la conf est écrite par l'agent d'enrôlement à l'enrôlement
 #     (jamais provisionnée, jamais versionnée — elle porte la clé privée du
 #     kit). Au premier démarrage elle n'existe pas encore : on l'attend.
-#   - l'agent d'enrôlement (tranche 2) : machine à états annexe 2 §3.3 —
-#     il vit ICI, en netns hôte (piège 17 : sur le bridge services il
-#     serait enfermé par le fail-closed qu'il doit amorcer), et il porte
-#     aussi le re-poll, le canal descendant.
+#   - l'agent d'enrôlement : machine à états annexe 2 §3.3 — il vit ICI,
+#     en netns hôte (piège 17 : sur le bridge services il serait enfermé
+#     par le fail-closed qu'il doit amorcer), et il porte aussi le
+#     re-poll, le canal descendant.
 #   - le watchdog (tranche 3) : bascule d'endpoint, indépendant de
 #     l'agent d'enrôlement (annexe 2, invariant 5) — il ne lit que
 #     endpoints.txt et port.
@@ -33,8 +33,8 @@ arreter() {
 trap arreter TERM INT
 
 # L'agent d'enrôlement d'abord : c'est lui qui écrit wg0.conf au premier
-# démarrage (état USINE). Tranche 2 — son absence n'empêche pas une maquette
-# de monter une conf déjà écrite.
+# démarrage (état USINE). Son absence n'empêche pas une maquette de monter
+# une conf déjà écrite — d'où la garde `-x` plutôt qu'un échec.
 if [ -x "$AGENT" ]; then
   "$AGENT" &
   PIDS="$PIDS $!"

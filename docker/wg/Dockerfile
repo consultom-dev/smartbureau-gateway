@@ -35,6 +35,10 @@ RUN apt-get update \
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY roles/ /usr/local/lib/wg/roles/
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/lib/wg/roles/*.sh
+# L'agent d'enrôlement est voisin de `roles/` — il source `roles/commun.sh`
+# par un chemin RELATIF, le même dans l'image et dans le dépôt (annexe 2 §3.3).
+COPY agent-enrolement.sh /usr/local/lib/wg/agent-enrolement.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/lib/wg/roles/*.sh \
+             /usr/local/lib/wg/agent-enrolement.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

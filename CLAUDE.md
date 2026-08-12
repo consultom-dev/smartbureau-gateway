@@ -76,7 +76,16 @@ local). Lots du plan : **2** (image `wg`), **4** (passerelle complète).
 docker build -t consultom/wg:dev docker/wg
 
 # Tranche 1 — les trois rôles montent leurs interfaces (maquette minimale)
+# Exige sudo ET le module noyau wireguard ; sinon les cas se déclarent SAUTÉS
 sudo ./tests/roles/lancer.sh              # R-01 … R-06
 
-# À compléter : tests/agent-enrolement (tranche 2), tests/netfilter (lot 4)
+# Tranche 2 — la machine à états de l'agent d'enrôlement, contre le mock
+# Ni Docker ni module noyau : root, python3, curl, jq
+sudo SMARTBUREAU_SERVER=/chemin/vers/smartbureau-server \
+     ./tests/agent-enrolement/lancer.py   # A-01 … A-16
+
+# Le lint partagé (il vit dans smartbureau-server)
+SMARTBUREAU_SERVER=… /chemin/vers/smartbureau-server/outillage/lint/lint.sh
+
+# À compléter : tests/netfilter (lot 4), watchdog (tranche 3)
 ```

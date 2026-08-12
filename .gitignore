@@ -18,3 +18,7 @@
 
 # contrat récupéré par outillage/recuperer-contrat.sh (non versionné : l'épingle fait foi)
 .contrat/
+
+# Cache d'octets Python des recettes (tests/*.py) — jamais versionné
+__pycache__/
+*.pyc

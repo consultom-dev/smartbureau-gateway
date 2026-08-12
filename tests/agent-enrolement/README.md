@@ -1,40 +1,73 @@
 # `tests/agent-enrolement/` — la machine à états, contre le mock
 
-**Lot 2.** Fait foi : **annexe 2 §3.3** ; critère de fini au plan §4. Le
-mock du plan de contrôle vit dans `smartbureau-server/contrats/mock/` et
-s'épingle **par commit**.
+**Lot 2, tranche 2.** Fait foi : **annexe 2 §3.2** (l'état local — fichiers,
+modes, propriétaires) et **§3.3** (les états et leurs transitions) ; critère
+de fini au plan §4. Le mock du plan de contrôle vit dans
+`smartbureau-server/contrats/mock/` et s'épingle **par commit**.
 
 ```
 USINE     POST /enroler en boucle (backoff 1→15 min)
-  ├─ 200 → secret_api, config wg0, endpoints.txt ; SUPPRIMER usine.json → NOMINAL
+  ├─ 200 → secret_api, wg0, endpoints, port, repoll, applicatif, domaines,
+  │        endpoints.version ; PUIS supprimer usine.json → NOMINAL
   └─ 403 → alerte locale, ET ON CONTINUE D'ESSAYER
 NOMINAL   GET /config-kit toutes les 6 h (et au boot), X-Version
-  ├─ 304 → rien   ├─ 200 → réécritures atomiques   └─ 403 → SUSPENDU
+  ├─ 304 → rien   ├─ 200 → écritures atomiques, témoin en dernier
+  ├─ 403 → SUSPENDU          └─ 401 → IDENTITE_PERDUE
 SUSPENDU  re-poll ralenti à 24 h ; 200 → NOMINAL ; 403 → rester
+IDENTITE_PERDUE  cadence NOMINALE ; amorce présente → re-enrôler ;
+                 porteur relisible → re-poll ; sans porteur → RELIRE
 ```
 
-## Ce que les cas doivent prouver
+## Lancer
 
-- **l'idempotence de `/enroler`** : même secret + même clé → même 200 ;
-  clé différente → 403 ;
-- **`usine.json` est supprimé** à l'enrôlement réussi (invariant 2) : le
-  secret est consommé côté serveur, le fichier n'a plus de valeur que pour
-  un voleur ;
-- **le re-poll ne s'arrête jamais** (invariant 4) : ralenti en suspendu,
-  mais vivant — c'est lui qui détecte la reprise. **Un kit ne se débranche
-  jamais tout seul** ;
-- **coupure à chaque étape, reprise idempotente** — y compris le cas dur :
-  la réponse perdue **après** traitement côté serveur ;
-- **les modes et propriétaires des fichiers d'état** (annexe 2 §3.2) :
-  `secret_api` et `tls/local.key` en **640 `root:smartbureau-lecture`**
-  (GID 3000 figé), `registre/auth.json` en **600 `root`** ;
-- **`endpoints.txt` ne contient que des IP** (invariant 5) ;
-- **l'agent d'enrôlement n'applique jamais `release_cible`**
-  (invariant 6) : il écrit le marqueur, l'updater exécute. Mélanger les
-  deux mettrait une mise à jour logicielle dans la boucle de survie du
-  tunnel ;
-- **le watchdog bascule même l'agent d'enrôlement tué**, et il ne lit
-  qu'`endpoints.txt`.
+```bash
+sudo ./tests/agent-enrolement/lancer.py                    # A-01 … A-16
+sudo SMARTBUREAU_SERVER=/chemin/vers/smartbureau-server \
+     ./tests/agent-enrolement/lancer.py
+```
 
-Le mock sait simuler les 304, les 403 de suspension, la règle de survie du
-bloc `registre` et les coupures : voir son README.
+Prérequis : **root** (l'agent d'enrôlement pose des modes et le GID 3000),
+`python3`, `curl`, `jq`, et le dépôt `smartbureau-server` à côté (ou
+`SMARTBUREAU_SERVER`). **Ni Docker ni module noyau** : c'est ce qui
+distingue ce banc de `tests/roles/`, qui exige `sudo` **et** le module
+`wireguard` et se déclare **sauté** — jamais vert — quand ils manquent. Un
+prérequis absent saute ici aussi.
+
+## Ce que le banc ne prouve pas
+
+Il recette la **machine à états** et les **écritures d'état**, pas
+WireGuard : `wg`, `wg-quick` et `ip` sont des doublures qui **journalisent
+leurs appels** (`banc.py`). C'est ce journal qui rend vérifiable ce qu'une
+interface réelle cacherait — qu'une clé privée n'est générée **qu'une
+fois**, et qu'une rotation passe par `wg syncconf` et **jamais** par un
+`wg-quick down`. Les interfaces, elles, sont l'affaire de `tests/roles/`.
+
+## Les seize cas
+
+| Cas | Ce qu'il prouve | Source |
+|---|---|---|
+| **A-01** | USINE → NOMINAL : l'ordre des écritures, les modes, les propriétaires ; `endpoints.txt` en IP seules, `repoll.txt` en couples | §3.2, §3.3, invariants 2, 3, 5, 12 |
+| **A-02** | la clé du kit naît **avant** le premier POST, et une seule fois — le pivot de l'idempotence | §3.5 ; annexe 1 §4.3 |
+| **A-03** | **le cas dur** : réponse perdue **après** traitement, puis rejeu — même /32, rien consommé deux fois | annexe 1, invariant 8 |
+| **A-04** | réponse perdue **avant** traitement : rien d'écrit, `usine.json` conservé, la boucle reprend | §3.3 |
+| **A-05** | `403` d'enrôlement : alerte locale, et **on continue d'essayer** | §3.3 |
+| **A-06** | `200` de re-poll : blocs `pki`/`tls`/`registre`, modes, et `endpoints.version` **en dernier** | §3.2, invariants 3, 11 |
+| **A-07** | `304` : le cas courant ne touche **rien** | §3.3 |
+| **A-08** | `release_cible` est un **marqueur** — l'agent d'enrôlement n'applique jamais | invariant 6 |
+| **A-09** | `403` → SUSPENDU ; le re-poll ne s'arrête jamais et détecte la reprise | invariant 4 |
+| **A-10** | `401` → IDENTITE_PERDUE : rien n'est purgé, et la cadence **nominale** est conservée (mesurée) | invariant 4, arbitrage N-1 |
+| **A-11** | IDENTITE_PERDUE avec l'amorce : on retente l'enrôlement | arbitrage Q6 |
+| **A-12** | IDENTITE_PERDUE sans porteur : **aucune requête n'est émise** | arbitrage Q6 |
+| **A-13** | repli sur l'IP : le **nom** est conservé, aucune empreinte épinglée | arbitrage Q3 |
+| **A-14** | rotation de clé : `wg syncconf`, jamais `down`/`up` ; le fichier `port` suit | arch. §11.4, arbitrage N4 |
+| **A-15** | `500`, temporisation, API morte : on garde tout et on retente | invariant 6 de l'annexe 3 |
+| **A-16** | les cadences par défaut sont celles du corpus (6 h / 24 h / 1→15 min) | §3.3 |
+
+Les cinq modes de coupure du mock sont tous employés : `avant` (A-04),
+`apres` (A-03), `erreur_500`, `temporisation` et `ecoute_fermee` (A-15).
+
+## Règle
+
+Chaque cas **cite sa source normative** — un test rouge doit dire quelle
+ligne du corpus n'est plus vraie. Un invariant cassé ne se contourne pas :
+il rouvre la discussion d'architecture.
