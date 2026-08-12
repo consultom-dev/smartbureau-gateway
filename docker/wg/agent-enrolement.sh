@@ -100,78 +100,22 @@ nettoyer() { rm -rf "$BAC"; }
 trap nettoyer EXIT
 trap 'nettoyer; exit 0' TERM INT
 
+# Redéfinit celle de commun.sh : trois processus dans le même conteneur.
 journal() { printf 'wg(agent-enrolement): %s\n' "$*" >&2; }
 
-# --- Écriture d'état : atomique, mode et propriétaire compris --------------
+# `poser`, `poser_valeur`, `retirer` et `lisible` viennent de `commun.sh` —
+# une seule implémentation de l'écriture atomique pour tout le conteneur.
 #
 # CONVENTION DE NOMMAGE — POSIX sh n'a pas de `local` : toute variable de
 # fonction est GLOBALE. Elles sont donc préfixées d'un `_` et l'espace de
-# noms est cloisonné par fonction : `poser` réserve `_chemin _mode _groupe
-# _rep _tmp` ; `appeler` réserve `_url _ip _rc _hote` ; `tour_usine`
-# réserve `_cle _pub _corps` ; `tour_repoll` réserve `_entree _porteur
-# _version _servi` ; `ecrire_wg0` réserve `_cle_wg0` ; `etat_ecrire`
-# réserve `_hs _ep`. Les deux fichiers sensibles du bac (`$CORPS`,
-# `$PORTEUR`) naissent en 600 et meurent avec le `trap`.
+# noms est cloisonné par fonction : `commun.sh` réserve `_chemin _mode
+# _groupe _rep _tmp` ; `appeler` réserve `_url _ip _rc _hote` ; `tour_usine`
+# réserve `_cle _pub` ; `tour_repoll` réserve `_entree _version _servi` ;
+# `ecrire_wg0` réserve `_cle_wg0` ; `etat_ecrire` réserve `_hs _ep _rendu` ;
+# `deduire_etat` réserve `_memorise`. Les deux fichiers sensibles du bac
+# (`$CORPS`, `$PORTEUR`) naissent en 600 et meurent avec le `trap`.
 # Une fonction n'écrit JAMAIS dans le préfixe d'une autre — c'est la seule
 # chose qui rende sûr d'appeler l'une depuis l'autre.
-
-poser() { # $1 chemin  $2 mode  $3 groupe (vide = aucun chown de groupe)
-          # contenu sur l'entrée standard
-  _chemin="$1"; _mode="$2"; _groupe="${3:-}"
-  _rep="$(dirname "$_chemin")"
-  mkdir -p "$_rep" || { journal "mkdir $_rep impossible"; return 1; }
-  # Temporaire UNIQUE par appel, jamais dérivé de `$$` : en dash, `$$` garde
-  # la valeur du shell père dans un sous-shell, si bien que deux `poser`
-  # imbriqués sur le même répertoire — cas réel : `ecrire_wg0` dont le tube
-  # déclenche la naissance de la clé privée — se partageaient le MÊME
-  # temporaire. Le `mv` de l'un arrachait le fichier sous le `cat` de
-  # l'autre : clé privée tronquée, puis écrasée, et plus jamais régénérée
-  # puisqu'elle existait. Un kit mort en silence, sans retour possible.
-  # Le contenu peut être un secret : le temporaire naît en 600, AVANT la
-  # première écriture. Élargir ensuite (640) est sûr ; l'inverse ne l'est pas.
-  _tmp="$(umask 077; mktemp "$_rep/.agent-tmp.XXXXXX")" \
-    || { journal "création d'un temporaire dans $_rep impossible"; return 1; }
-  if ! cat > "$_tmp"; then
-    rm -f "$_tmp"; journal "écriture $_chemin impossible"; return 1
-  fi
-  # Durabilité AVANT publication : le raisonnement « le témoin après ce
-  # qu'il atteste » ne vaut que si le contenu a atteint le disque avant le
-  # `rename` qui le rend visible.
-  sync
-  if ! chmod "$_mode" "$_tmp"; then
-    rm -f "$_tmp"; journal "chmod $_mode $_chemin impossible"; return 1
-  fi
-  if [ -n "$_groupe" ] && ! chown "0:$_groupe" "$_tmp"; then
-    # Jamais de repli silencieux : un fichier de secret sans son groupe est
-    # soit illisible par le conteneur qui en dépend, soit trop ouvert.
-    rm -f "$_tmp"; journal "chown 0:$_groupe $_chemin impossible"; return 1
-  fi
-  if ! mv -f "$_tmp" "$_chemin"; then
-    rm -f "$_tmp"; journal "rename vers $_chemin impossible"; return 1
-  fi
-  sync
-  return 0
-}
-
-# Pose un contenu DÉJÀ EN MAIN, et ne pose RIEN s'il est vide. Un bloc servi
-# vide (ou absent d'une réponse plus ancienne) ne doit jamais TRONQUER un
-# fichier d'état : `endpoints.txt` vidé, c'est le watchdog sans adresse de
-# bascule ; `crl.pem` vidé, c'est FreeRADIUS qui refuse tous les postes.
-poser_valeur() { # $1 contenu  $2 chemin  $3 mode  [$4 groupe]
-  if [ -z "$1" ]; then
-    journal "valeur vide pour $2 — fichier conservé en l'état"
-    return 0
-  fi
-  printf '%s\n' "$1" | poser "$2" "$3" "${4:-}"
-}
-
-retirer() { # $1 chemin — suppression durable
-  rm -f "$1" || return 1
-  sync
-  return 0
-}
-
-lisible() { [ -r "$1" ] && [ -s "$1" ]; }
 
 # --- etat-agent.json (annexe 2 §3.2) ---------------------------------------
 # UN SEUL PROPRIÉTAIRE PAR FICHIER. L'agent d'enrôlement possède
@@ -192,12 +136,15 @@ etat_ecrire() { # $1 etat  $2 code HTTP (ou "-")  $3 détail libre
     _ep="$(wg show wg0 endpoints 2>/dev/null | awk 'NR==1{print $2}')"
   fi
   case "${_hs:-}" in ''|*[!0-9]*) _hs=0 ;; esac
-  jq -n --arg etat "$1" --arg code "$2" --arg detail "${3:-}" \
+  # `poser_valeur` et non `poser` : un `jq` en échec produirait un flux VIDE,
+  # et `poser` publierait un `etat-agent.json` de zéro octet — l'état
+  # mémorisé serait perdu, donc SUSPENDU et IDENTITE_PERDUE avec lui.
+  _rendu="$(jq -n --arg etat "$1" --arg code "$2" --arg detail "${3:-}" \
         --arg endpoint "${_ep:-}" --argjson hs "$_hs" \
         --arg horodatage "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
      '{etat:$etat, code_config_kit:$code, detail:$detail,
-       endpoint:$endpoint, dernier_handshake:$hs, horodatage:$horodatage}' \
-    | poser "$ETAT" 644
+       endpoint:$endpoint, dernier_handshake:$hs, horodatage:$horodatage}')" || return 1
+  poser_valeur "$_rendu" "$ETAT" 644
 }
 
 # --- HTTP : le nom d'abord, l'IP en repli SANS perdre le nom ---------------
