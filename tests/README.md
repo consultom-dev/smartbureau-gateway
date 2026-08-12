@@ -7,8 +7,9 @@
 | `roles/` | les cas **R-01 … R-06** — les trois rôles montent leurs interfaces (**sudo + module noyau `wireguard`**) | 2 | annexe 7 §1, arch. §6.2 |
 | `agent-enrolement/` | les cas **A-01 … A-17** — la machine à états rejouée **contre le mock** (ni Docker ni module noyau) | 2 | annexe 2 §3.2 et §3.3 |
 | `watchdog/` | les cas **W-01 … W-12** — la bascule d'endpoint et la boucle de marqueurs (ni root, ni Docker, ni réseau) | 2 | annexe 2 §3.4 et §3.4 bis |
-| `netfilter/` | les cas **P-01 … P-05** sur le gabarit partagé (**root + netns**) | 4 | annexe 3 §3.2 et §8 |
+| `netfilter/` | les cas **P-01 … P-06** sur le gabarit partagé (**root + netns**) | 4 | annexe 3 §3.2 et §8 |
 | `agent-passerelle/` | les cas **G-01 … G-10** — la boucle contre le mock : diff, 401, ipset | 4 | annexe 3 §4 |
+| `sonde/` | les cas **S-01 … S-06** — la santé du nœud (ni root, ni réseau) | 4 | annexe 3 §3.3 |
 | `configuration/` | les cas **C-01 … C-08** — compose, proxy d'enrôlement, provisionnement | 4 | annexe 3 §2, §5, §7 |
 
 `tap.py` est le rapporteur commun aux recettes Python du projet (TAP, cas

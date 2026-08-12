@@ -33,7 +33,7 @@
 # =============================================================================
 set -u
 
-API="${API:?API non définie — https://api.<domaine>}"
+API="${API:?API non définie — https://api.server.<domaine>.tld}"
 GW_ID="${GW_ID:?GW_ID non défini}"
 AGENT_SECRET="${AGENT_SECRET:?AGENT_SECRET non défini (tiré de Vault au provisionnement)}"
 
@@ -41,6 +41,12 @@ IFACE_KITS="${IFACE_KITS:-wg-kits}"
 IPSET_INTERNET="${IPSET_INTERNET:-internet_ok}"
 ETAT="${AGENT_ETAT:-/var/lib/wg-agent}"
 VERSION="$ETAT/peers.version"
+# La table SERVIE, mémorisée. Elle n'est pas « la liste » que l'invariant 8
+# proscrit — le diff porte toujours sur `wg show`. Elle est la CIBLE, et il
+# faut la garder : sans elle, un `304` (le cas nominal, 99 % des tours) ne
+# donne rien à comparer, et une interface remontée à vide après un
+# `wg-quick` rejoué à la main resterait vide pour toujours.
+PEERS="$ETAT/peers.json"
 
 PERIODE="${AGENT_PERIODE_S:-30}"
 BACKOFF_MAX="${AGENT_BACKOFF_MAX_S:-300}"
@@ -55,6 +61,8 @@ LOT_ETAT="${AGENT_LOT_ETAT:-200}"
 case "$PERIODE"   in ''|*[!0-9]*) PERIODE=30 ;; esac
 case "$TOURS_MAX" in ''|*[!0-9]*) TOURS_MAX=0 ;; esac
 case "$LOT_ETAT"  in ''|*[!0-9]*|0) LOT_ETAT=200 ;; esac
+case "$BACKOFF_MAX" in ''|*[!0-9]*) BACKOFF_MAX=300 ;; esac
+case "$DELAI_HTTP"  in ''|*[!0-9]*) DELAI_HTTP=20 ;; esac
 
 BAC="$(mktemp -d)"
 REPONSE="$BAC/reponse"
@@ -87,38 +95,60 @@ recuperer_peers() {
   [ -n "$CODE" ] || CODE="000"
 }
 
-# Le DIFF, sur `wg show` — jamais sur une liste mémorisée (invariant 8).
+# Le DIFF, sur `wg show` — jamais sur ce que l'agent de passerelle CROIT
+# avoir posé (invariant 8). La table servie vient de `$PEERS`, l'état réel
+# de l'interface : c'est leur écart qu'on applique, à chaque tour.
 appliquer_peers() {
   _servis="$BAC/servis"; _poses="$BAC/poses"
-  jq -r '.peers[]? | "\(.cle_publique) \(.allowed_ips)"' "$REPONSE" \
-    | sort > "$_servis" || return 1
+  # `jq` en commande SÉPARÉE, jamais en tête de tube : en `sh` sans
+  # `pipefail`, un `cmd | sort > f || return 1` teste `sort`, pas `cmd`. Un
+  # corps illisible (page d'erreur d'un intermédiaire, réponse tronquée)
+  # produirait alors une table servie VIDE — et la boucle de retraits
+  # purgerait toute la passerelle. Un plan de contrôle bavard mais cassé
+  # est pire qu'un plan de contrôle muet (invariant 6).
+  jq -r '.peers[]? | "\(.cle_publique) \(.allowed_ips)"' "$PEERS" > "$BAC/servis.brut" \
+    || { journal "table servie illisible — RIEN n'est appliqué, la table en place reste"; return 1; }
+  sort < "$BAC/servis.brut" > "$_servis"
   # `wg show <iface> dump` : première ligne = l'interface, puis un peer par
   # ligne (clé, psk, endpoint, allowed-ips, …).
   wg show "$IFACE_KITS" dump 2>/dev/null | awk 'NR>1 {print $1, $4}' \
     | sort > "$_poses"
 
-  # Ajouts et MODIFICATIONS (un /32 qui change est un couple différent).
-  _n=0
+  _echecs=0 _n=0 _r=0
+  # `comm` sur deux fichiers triés : un passage, zéro fork par ligne. Le
+  # `grep` par ligne coûtait 26 s par battement à 10 000 kits — pour un
+  # battement de 30 s, et un contrat qui promet « appliqué en ≤ 30 s ».
+  comm -13 "$_poses" "$_servis" > "$BAC/a-poser"
   while read -r cle ips; do
     [ -n "${cle:-}" ] || continue
-    grep -qxF "$cle $ips" "$_poses" && continue
     if wg set "$IFACE_KITS" peer "$cle" allowed-ips "$ips"; then
       _n=$((_n + 1))
     else
-      journal "pose du peer ${cle%%????????*}… en échec — nouvel essai au prochain tour"
+      journal "pose du peer ${cle%"${cle#????????}"}… en échec"
+      _echecs=$((_echecs + 1))
     fi
-  done < "$_servis"
+  done < "$BAC/a-poser"
 
   # Retraits : ce qui est posé et n'est plus servi. Le retrait porte sur la
-  # CLÉ seule — un peer dont le /32 a changé a déjà été mis à jour ci-dessus.
-  _r=0
+  # CLÉ seule — un peer dont le /32 a changé vient d'être mis à jour.
   cut -d' ' -f1 "$_servis" | sort -u > "$BAC/cles-servies"
-  cut -d' ' -f1 "$_poses"  | sort -u | while read -r cle; do
+  cut -d' ' -f1 "$_poses"  | sort -u > "$BAC/cles-posees"
+  comm -13 "$BAC/cles-servies" "$BAC/cles-posees" > "$BAC/a-retirer"
+  while read -r cle; do
     [ -n "${cle:-}" ] || continue
-    grep -qxF "$cle" "$BAC/cles-servies" && continue
-    wg set "$IFACE_KITS" peer "$cle" remove && _r=$((_r + 1))
-  done
-  [ "$_n" -gt 0 ] && journal "$_n peer(s) posé(s) ou mis à jour"
+    if wg set "$IFACE_KITS" peer "$cle" remove; then
+      _r=$((_r + 1))
+    else
+      _echecs=$((_echecs + 1))
+    fi
+  done < "$BAC/a-retirer"
+
+  [ "$_n" -gt 0 ] || [ "$_r" -gt 0 ] \
+    && journal "$_n peer(s) posé(s) ou mis à jour, $_r retiré(s)"
+  # Un `wg set` en échec — l'interface n'existe pas encore, couplage lâche
+  # (§4.1) — doit REMONTER : sinon la version serait mémorisée, le tour
+  # suivant recevrait un 304, et la table resterait à moitié posée.
+  [ "$_echecs" -eq 0 ] || { journal "$_echecs opération(s) en échec — application INCOMPLÈTE"; return 1; }
   return 0
 }
 
@@ -133,19 +163,23 @@ appliquer_ipset() {
     journal "ipset $IPSET_INTERNET absente — le conteneur wg ne l'a pas encore créée"
     return 0
   }
-  jq -r '.peers[]? | select(.internet == true) | .allowed_ips' "$REPONSE" \
-    | sed 's,/.*,,' | sort -u > "$BAC/internet-servis" || return 1
+  jq -r '.peers[]? | select(.internet == true) | .allowed_ips' "$PEERS" \
+    > "$BAC/internet.brut" \
+    || { journal "table servie illisible — l'ipset n'est PAS touchée"; return 1; }
+  sed 's,/.*,,' < "$BAC/internet.brut" | sort -u > "$BAC/internet-servis"
   ipset list "$IPSET_INTERNET" | awk '/^[0-9]+\./ {print $1}' \
     | sort -u > "$BAC/internet-poses"
 
+  comm -13 "$BAC/internet-poses" "$BAC/internet-servis" > "$BAC/ipset-a-ajouter"
+  comm -23 "$BAC/internet-poses" "$BAC/internet-servis" > "$BAC/ipset-a-retirer"
   while read -r ip; do
     [ -n "${ip:-}" ] || continue
-    grep -qxF "$ip" "$BAC/internet-poses" || ipset add "$IPSET_INTERNET" "$ip" -exist
-  done < "$BAC/internet-servis"
+    ipset add "$IPSET_INTERNET" "$ip" -exist
+  done < "$BAC/ipset-a-ajouter"
   while read -r ip; do
     [ -n "${ip:-}" ] || continue
-    grep -qxF "$ip" "$BAC/internet-servis" || ipset del "$IPSET_INTERNET" "$ip"
-  done < "$BAC/internet-poses"
+    ipset del "$IPSET_INTERNET" "$ip"
+  done < "$BAC/ipset-a-retirer"
   return 0
 }
 
@@ -207,17 +241,33 @@ while :; do
 
   recuperer_peers
   case "$CODE" in
-    304)
-      backoff="$PERIODE" ;;
-    200)
+    304|200)
       backoff="$PERIODE"
-      if appliquer_peers && appliquer_ipset; then
-        # La version n'est mémorisée QU'APRÈS application : la mémoriser
-        # avant ferait répondre 304 au tour suivant sur une table que
-        # l'on n'a pas su poser.
-        jq -r '.version // empty' "$REPONSE" > "$VERSION"
-      else
-        journal "application incomplète — version NON mémorisée, on redemandera tout"
+      if [ "$CODE" = "200" ]; then
+        # Le corps est VALIDÉ avant de remplacer la table servie : un
+        # `200` illisible ne doit pas effacer la cible.
+        if jq -e '.peers' "$REPONSE" >/dev/null 2>&1; then
+          cp "$REPONSE" "$PEERS"
+        else
+          journal "200 au corps illisible — table servie CONSERVÉE, rien n'est purgé"
+        fi
+      fi
+      # ON APPLIQUE À CHAQUE TOUR, `304` COMPRIS. Le `304` dit « la table
+      # servie n'a pas changé », pas « l'interface est conforme » : un
+      # `wg-quick` rejoué à la main, un conteneur redémarré, un peer effacé
+      # laissent une interface qui diverge de la table sans que le serveur
+      # en sache rien. C'est tout le sens de l'invariant 8 — et sans cela,
+      # une passerelle remontée à vide ne servirait plus JAMAIS un kit.
+      if [ -r "$PEERS" ]; then
+        if appliquer_peers && appliquer_ipset; then
+          # La version n'est mémorisée QU'APRÈS application réussie : la
+          # mémoriser avant ferait répondre 304 au tour suivant sur une
+          # table que l'on n'a pas su poser.
+          [ "$CODE" = "200" ] && jq -r '.version // empty' "$REPONSE" > "$VERSION"
+        else
+          journal "application incomplète — version NON mémorisée, on redemandera tout"
+          rm -f "$VERSION"
+        fi
       fi ;;
     401)
       # Secret révoqué, ou nœud retiré. ON NE PURGE RIEN (invariant 6) :

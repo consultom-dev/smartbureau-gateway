@@ -73,7 +73,7 @@ try:
           "annexe 3 §8 invariant 3 ; arch. §12.3")
     for nom in ("agent", "enrolement-proxy"):
         bloc = service(nom)
-        r.verifier("extra_hosts:" in bloc and "api.${DOMAINE}:10.100.0.1" in bloc,
+        r.verifier("extra_hosts:" in bloc and "api.server.${DOMAINE}:10.100.0.1" in bloc,
                    "%s porte l'extra_hosts api. — sans lui il ne résout rien "
                    "et la passerelle naît muette" % nom, bloc[:200])
     r.verifier("extra_hosts" not in service("wireguard"),

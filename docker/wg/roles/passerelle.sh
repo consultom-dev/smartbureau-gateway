@@ -50,10 +50,20 @@ PIDS=""
 
 arreter() {
   for p in $PIDS; do kill -TERM "$p" 2>/dev/null || true; done
-  # Laisser la boucle retirer SES règles avant de descendre les interfaces :
-  # l'inverse laisserait des règles orphelines référençant des interfaces
-  # disparues, que le prochain démarrage retrouverait sans les reconnaître.
-  [ -n "$PIDS" ] && sleep 1
+  # ATTENDRE que la boucle ait retiré SES règles, sans le supposer : les
+  # descendre d'abord laisserait des règles orphelines référençant des
+  # interfaces disparues, que le prochain démarrage retrouverait sans les
+  # reconnaître. On attend qu'elle ait rendu la main, jusqu'à 5 s — au-delà,
+  # `compose stop` nous tuerait de toute façon, et des règles orphelines
+  # valent mieux qu'un arrêt qui ne finit pas.
+  _tours=0
+  while [ -n "$PIDS" ] && [ "$_tours" -lt 10 ]; do
+    _encore=0
+    for p in $PIDS; do kill -0 "$p" 2>/dev/null && _encore=1; done
+    [ "$_encore" = 0 ] && break
+    _tours=$((_tours + 1))
+    sleep 0.5
+  done
   descendre wg-core wg-kits
   exit 0
 }

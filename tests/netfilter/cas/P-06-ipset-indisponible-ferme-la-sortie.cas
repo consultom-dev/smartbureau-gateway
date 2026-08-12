@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# cas/P-06-ipset-indisponible-ferme-la-sortie.cas
+#
+# Ce qui arrive quand l'ipset n'est PAS utilisable — module absent, ou,
+# comme ici, un ensemble homonyme du mauvais type resté d'une version
+# précédente. C'est une panne d'outillage, et une panne d'outillage ne doit
+# pas ouvrir le relais.
+#
+# Le piège est franc : la règle 4 (`-m set --match-set internet_ok src`)
+# refuse de se poser sans l'ensemble. Abandonner la pose à cet endroit —
+# ce que fait n'importe quel `|| return 1` mis là par prudence — laisse la
+# passerelle SANS le DROP kit → kit et SANS le fourre-tout : elle relaie
+# 10 000 kits les uns vers les autres, et l'invariant 2 tombe sur une
+# erreur qui ne le concernait pas.
+#
+# La bonne réponse est l'inverse : poser tout le reste, et OMETTRE la seule
+# règle qui dépend de l'ensemble. Sans elle, la sortie internet des kits
+# est fermée — le fourre-tout la refuse — ce qui est la version fermée de
+# la panne.
+
+set -euo pipefail
+. "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
+
+cas "P-06" "Ipset inutilisable : la sortie internet ferme, le hub-and-spoke tient" \
+    --source "annexe 3 §3.2 ; annexe 3 §8 invariants 1 et 2" \
+    --lot 4
+
+preparer() {
+  banc_creer p06
+  banc_role passerelle
+  # Un ensemble homonyme du MAUVAIS TYPE : `ipset create … hash:ip -exist`
+  # échoue alors, et `-m set` refusera la règle 4.
+  dans_sut ipset create internet_ok hash:net
+}
+
+agir() {
+  env_config IFACES_PUBLIQUES=eth0
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+}
+
+verifier() {
+  [ "$CODE" -eq 0 ] || echec "la pose a rendu $CODE : $ERREUR"
+
+  # La panne est DITE, pas avalée : sans ce message, l'exploitant cherche
+  # pourquoi ses kits autorisés ne sortent plus.
+  case "$ERREUR" in
+    *"indisponible"*) _ok "la panne d'ipset est journalisée" ;;
+    *) _ko "rien dans le journal ne dit que l'ipset est indisponible" "$ERREUR" ;;
+  esac
+
+  # Les deux verrous sont là — c'est tout l'enjeu.
+  regle_presente filter FORWARD -i wg-kits -o wg-kits -j DROP
+  regle_presente filter FORWARD -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  regle_presente filter INPUT   -i wg-kits -j REJECT
+  regle_en_position filter FORWARD derniere \
+    -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+
+  # Et le chemin du plan de contrôle reste ouvert : une panne de sortie
+  # internet n'a pas à couper `/config-kit` de toute la flotte.
+  regle_presente filter FORWARD -i wg-kits -o wg-core -j ACCEPT
+
+  # La règle 4, elle, est ABSENTE — pas posée sans son `-m set`, sinon tout
+  # kit sortirait, autorisé ou non.
+  nombre_de_regles_est filter FORWARD 0 'match-set internet_ok'
+  nombre_de_regles_est filter FORWARD 0 '\-i wg-kits -o eth0 -j ACCEPT'
+}
+
+fin_cas

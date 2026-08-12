@@ -38,7 +38,7 @@ verifier() {
 
   # Le service local est injoignable depuis un kit : c'est INPUT qui le dit.
   compteurs_raz
-  rejete kitA 10.200.0.1 9999 --delai 3
+  rejete kitA 10.200.0.1 9999 --explicite --delai 3
   compteur_non_nul filter INPUT 'REJECT'
 
   # La démonstration négative : sans le verrou INPUT, le fourre-tout de
@@ -47,7 +47,7 @@ verifier() {
   ipt -t filter -D INPUT -i wg-kits -j REJECT
   joignable kitA 10.200.0.1 9999
   ipt -t filter -A INPUT -i wg-kits -j REJECT
-  rejete kitA 10.200.0.1 9999 --delai 3
+  rejete kitA 10.200.0.1 9999 --explicite --delai 3
 }
 
 fin_cas

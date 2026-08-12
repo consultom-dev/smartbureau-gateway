@@ -51,9 +51,9 @@ services:
     network_mode: host
     cap_add: [NET_ADMIN]           # `wg set` et `ipset` — aucune clé, aucune règle
     extra_hosts:                   # plan machine : aucun A public (invariant 3)
-      - "api.${DOMAINE}:10.100.0.1"
+      - "api.server.${DOMAINE}:10.100.0.1"
     environment:
-      - API=https://api.${DOMAINE}
+      - API=https://api.server.${DOMAINE}
       - GW_ID=${GW_ID}
       - AGENT_SECRET=${AGENT_SECRET}     # tiré de Vault au provisionnement
     restart: unless-stopped
@@ -63,10 +63,10 @@ services:
     container_name: enrolement-proxy
     ports: ["443:443"]             # pas de port 80 : le certificat vient de Vault
     extra_hosts:                   # plan machine : aucun A public (invariant 3)
-      - "api.${DOMAINE}:10.100.0.1"
+      - "api.server.${DOMAINE}:10.100.0.1"
     environment:
       - NOM=${GW_ID}.gateway.${DOMAINE}
-      - API=https://api.${DOMAINE}
+      - API=https://api.server.${DOMAINE}
     volumes:
       - ./tls:/etc/proxy/tls:ro    # wildcard *.gateway tiré de Vault
     restart: unless-stopped

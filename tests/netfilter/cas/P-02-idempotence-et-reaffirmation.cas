@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # cas/P-02-idempotence-et-reaffirmation.cas
 #
-# La pose est idempotente, et la boucle rattrape ce que docker repousse.
-# C'est la propriété qui permet de redémarrer un conteneur, de rejouer un
-# `wg-quick` à la main, ou de laisser dockerd réécrire ses chaînes, sans
-# jamais accumuler de doublon ni perdre une règle.
+# La pose est idempotente, et la boucle rattrape ce que docker repousse —
+# EN RENDANT L'ORDRE, pas seulement les règles. C'est la propriété qui
+# permet de redémarrer un conteneur, de rejouer un `wg-quick` à la main ou
+# de laisser dockerd réécrire ses chaînes, sans accumuler de doublon et
+# sans qu'une règle revienne du mauvais côté du fourre-tout.
+#
+# Ce cas tient la moitié coûteuse de l'arbitrage Q8. Une réaffirmation qui
+# se contente de remettre en queue la règle manquante remet l'ACCEPT vers
+# wg-core DERRIÈRE le REJECT : la règle est présente, comptée, vérifiable
+# par `-C`… et morte. Toute la flotte servie perd le plan de contrôle, et
+# la sonde reste verte. D'où la reconstruction complète, et d'où ce cas.
 
 set -euo pipefail
 . "${GABARIT:?variable GABARIT non définie — lancer par ./lancer.sh}/gabarit.sh"
 
-cas "P-02" "Poser trois fois ne pose qu'une fois ; la boucle rattrape une règle effacée" \
-    --source "annexe 3 §3.2 (réaffirmation 30 s) ; annexe 3 §8 invariant 8" \
+cas "P-02" "Poser trois fois ne pose qu'une fois ; une règle effacée revient À SA PLACE" \
+    --source "annexe 3 §3.2 (réaffirmation 30 s) ; arbitrage Q8 ; annexe 3 §8 invariant 8" \
     --lot 4
 
 preparer() {
@@ -26,28 +33,62 @@ agir() {
 verifier() {
   [ "$CODE" -eq 0 ] || echec "la pose a rendu $CODE : $ERREUR"
 
-  # Trois poses, une seule règle de chaque : c'est le `-C` avant le `-A`.
-  # (`proprietaire_unique` prend un MOTIF, pas une spécification.)
+  # Trois poses, une seule règle de chaque : rien à faire quand rien ne
+  # manque — le tour se conclut sans toucher à netfilter.
   proprietaire_unique filter FORWARD 'wg-kits -o wg-kits -j DROP'
   proprietaire_unique filter FORWARD 'wg-kits -j REJECT'
   proprietaire_unique filter INPUT   'wg-kits -j REJECT'
   proprietaire_unique nat POSTROUTING 'wg-core -j MASQUERADE'
   nombre_de_regles_est filter FORWARD 6 'wg-'
 
-  # Quelqu'un efface l'isolation — dockerd qui réécrit, un exploitant qui
-  # « nettoie ». Le tour suivant la remet, sans rien dupliquer d'autre.
+  # --- Cas 1 : quelqu'un efface l'ISOLATION -------------------------------
+  # dockerd qui réécrit, un exploitant qui « nettoie ». Le tour suivant la
+  # remet — et la remet DEVANT le reste, là où elle tranche.
   ipt -t filter -D FORWARD -i wg-kits -o wg-kits -j DROP
   regle_absente filter FORWARD -i wg-kits -o wg-kits -j DROP
   executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  [ "$CODE" -eq 0 ] || echec "la reconstruction a rendu $CODE : $ERREUR"
+
   regle_presente filter FORWARD -i wg-kits -o wg-kits -j DROP
-  proprietaire_unique filter FORWARD 'wg-kits -j REJECT'
+  nombre_de_regles_est filter FORWARD 6 'wg-'
+  regle_avant filter FORWARD \
+    -i wg-kits -o wg-kits -j DROP \
+    -- -i wg-kits -o wg-core -j ACCEPT
+
+  # --- Cas 2 : quelqu'un efface le CHEMIN AUTORISÉ ------------------------
+  # Le cas qui coûte. Remise en queue, cette règle passerait derrière le
+  # fourre-tout et la passerelle couperait wg-core à toute sa flotte.
+  ipt -t filter -D FORWARD -i wg-kits -o wg-core -j ACCEPT
+  regle_absente filter FORWARD -i wg-kits -o wg-core -j ACCEPT
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  [ "$CODE" -eq 0 ] || echec "la reconstruction a rendu $CODE : $ERREUR"
+
+  regle_presente filter FORWARD -i wg-kits -o wg-core -j ACCEPT
+  regle_avant filter FORWARD \
+    -i wg-kits -o wg-core -j ACCEPT \
+    -- -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  regle_en_position filter FORWARD derniere \
+    -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
   nombre_de_regles_est filter FORWARD 6 'wg-'
 
-  # ... mais elle revient EN QUEUE : le fourre-tout n'est plus dernier.
-  # C'est le prix d'une réaffirmation par `-A`, et il est acceptable — la
-  # règle rétablie DROP kit→kit, que le fourre-tout aurait de toute façon
-  # rejeté. L'ordre nominal se retrouve au redémarrage du conteneur.
-  regle_presente filter FORWARD -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  # --- Cas 3 : quelqu'un remonte le fourre-tout EN TÊTE --------------------
+  # Aucune règle ne manque, et pourtant la politique est inversée : un `-C`
+  # ne sait pas le dire, seule la position le dit. Le tour suivant le voit
+  # et repose la séquence.
+  ipt -t filter -D FORWARD -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  ipt -t filter -I FORWARD 1 -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  executer "$SUJET/docker/wg/netfilter-passerelle.sh"
+  [ "$CODE" -eq 0 ] || echec "la reconstruction a rendu $CODE : $ERREUR"
+
+  regle_en_position filter FORWARD derniere \
+    -i wg-kits -j REJECT --reject-with icmp-admin-prohibited
+  nombre_de_regles_est filter FORWARD 6 'wg-'
+
+  # --- Et le barrage de reconstruction ne reste pas derrière nous ---------
+  # Il est posé en tête AVANT le démontage — fenêtre fermée, pas ouverte —
+  # et retiré une fois la séquence rendue. Oublier de le retirer couperait
+  # les kits pour de bon : `-i wg-kits -j DROP` sans `-o` avale tout.
+  nombre_de_regles_est filter FORWARD 0 '^-A FORWARD -i wg-kits -j DROP$'
 }
 
 fin_cas

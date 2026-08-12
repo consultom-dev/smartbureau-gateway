@@ -23,6 +23,10 @@ http {
   access_log /dev/stdout combined;
   error_log  /dev/stderr warn;
 
+  # La seule exposition publique du nœud n'annonce pas sa version : elle
+  # dirait à qui scanne quelle CVE essayer (arch. §11.2).
+  server_tokens off;
+
   # AUCUNE journalisation de corps : les secrets d'usine et les secrets
   # d'API y transitent (annexe 3 §5, arch. §11.2).
   client_body_buffer_size 32k;
@@ -41,8 +45,11 @@ http {
   upstream plan_de_controle { server API_HOTE:443; keepalive 8; }
 
   server {
-    listen 443 ssl;
-    http2 on;
+    # `http2` EN PARAMÈTRE DE `listen`, et pas la directive `http2 on;` :
+    # celle-ci n'existe qu'à partir de nginx 1.25.1, et la base Debian 12
+    # épinglée sert 1.22.1 — `unknown directive "http2"`, nginx refuse de
+    # démarrer, et la passerelle n'a plus d'enrôlement du tout.
+    listen 443 ssl http2;
     server_name NOM_PUBLIC;
 
     # Wildcard *.gateway.<domaine>.tld tiré de Vault (§2.4), PARTAGÉ par les

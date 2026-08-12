@@ -61,16 +61,23 @@ verifier() {
   ipset_contient        internet_ok 10.200.0.5
   ipset_ne_contient_pas internet_ok 10.200.0.6
   joignable kitA 203.0.113.9 8000
-  rejete    kitB 203.0.113.9 8000 --delai 3
+  # EXPLICITE : kitB n'est pas en panne, il est non autorisé, et il
+  # l'apprend en quelques millisecondes là où kitA→kitB attendait le délai
+  # plein. C'est la moitié observable de Q9 — la SEULE. La forme du refus
+  # (`--reject-with icmp-admin-prohibited`) ne se voit pas au chronomètre :
+  # les quatre formes de REJECT sont indiscernables entre elles (mesure du
+  # 12/08/2026, docstring de `rejete`). Elle se tient statiquement, en
+  # P-01, et c'est là qu'un retrait de l'option ferait rougir la recette.
+  rejete    kitB 203.0.113.9 8000 --explicite --delai 3
 
   # Le refus de kitB est celui du fourre-tout, pas du DROP entre kits.
   compteurs_raz
-  rejete kitB 203.0.113.9 8000 --delai 3
+  rejete kitB 203.0.113.9 8000 --explicite --delai 3
   compteur_non_nul filter FORWARD 'REJECT'
 
   # --- Retirer de l'ipset referme, sans toucher à une seule règle ----------
   dans_sut ipset del internet_ok 10.200.0.5
-  rejete kitA 203.0.113.9 8000 --delai 3
+  rejete kitA 203.0.113.9 8000 --explicite --delai 3
   dans_sut ipset add internet_ok 10.200.0.5 -exist
   joignable kitA 203.0.113.9 8000
 }

@@ -49,6 +49,9 @@ case "$1" in
     printf 'CLE-PRIVEE\tCLE-PUBLIQUE\t51820\toff\n'
     cat "$BANC_PEERS" 2>/dev/null ;;
   set)
+    # Panne d'application injectée par le banc : `wg set` échoue, comme
+    # quand l'interface n'existe pas encore (couplage lâche, §4.1).
+    [ -n "${BANC_WG_SET_KO:-}" ] && exit 1
     # wg set <iface> peer <cle> allowed-ips <ips> | remove
     cle="$4"
     tmp="$(mktemp)"
@@ -180,7 +183,7 @@ class Banc:
                 f.write("".join(ip + "\n" for ip in ipset))
         return base
 
-    def agent(self, base, tours=1, periode=0, timeout=60):
+    def agent(self, base, tours=1, periode=0, timeout=60, extra=None):
         env = {k: v for k, v in os.environ.items()
                if k.lower() not in ("http_proxy", "https_proxy", "all_proxy", "no_proxy")}
         env.update({
@@ -197,6 +200,7 @@ class Banc:
             "BANC_PEERS": os.path.join(base, "peers"),
             "BANC_IPSET": os.path.join(base, "ipset"),
         })
+        env.update(extra or {})
         return subprocess.run(["sh", AGENT], env=env, timeout=timeout,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -305,21 +309,32 @@ try:
     # =========================================================================
     r.cas("G-03 — le diff porte sur `wg show`, jamais sur une liste mémorisée",
           "annexe 3 §8 invariant 8")
-    # Quelqu'un pose un peer parasite à la main, et en efface un vrai. La
-    # version n'a pas bougé côté serveur : un agent qui ferait confiance à sa
-    # mémoire ne verrait rien. Celui-ci relit l'interface.
+    # Quelqu'un pose un peer parasite à la main, et efface les deux vrais —
+    # un `wg-quick down/up` rejoué, un exploitant qui « nettoie ».
+    #
+    # LE CAS TIENT À CE QU'ON NE TOUCHE PAS À `peers.version` : côté serveur
+    # rien n'a changé, le pull rend un **304**, et un agent qui déduirait de
+    # sa mémoire « déjà appliqué, rien à faire » ne verrait RIEN. C'est
+    # exactement l'invariant 8, et c'est la seule mise en scène qui le
+    # distingue : forcer un 200 (en effaçant la version) ferait passer les
+    # deux implémentations, celle qui relit l'interface comme celle qui
+    # réapplique aveuglément une liste mémorisée.
     with open(os.path.join(base, "peers"), "w") as f:
         f.write("CLE-PARASITE-POSEE-A-LA-MAIN=\t(none)\t(none)\t10.200.9.9/32\t0\t0\t0\n")
-    # On force un 200 en oubliant la version mémorisée : c'est le cas d'un
-    # redémarrage de conteneur, pas une astuce de test.
-    os.remove(os.path.join(base, "etat", "peers.version"))
+    version_avant = open(os.path.join(base, "etat", "peers.version")).read()
+    marque = banc.marque_trace()
     banc.agent(base, tours=1)
+    appels = banc.requetes_depuis(marque, "/peers")
+    r.verifier(appels and "-> 304" in appels[0],
+               "le pull est bien un 304 — rien n'a changé côté serveur", appels)
     poses = dict(banc.peers(base))
     r.verifier(CLE_A0009 in poses and CLE_A0001 in poses,
-               "les peers effacés à la main sont REPOSÉS", poses)
+               "et pourtant les peers effacés à la main sont REPOSÉS", poses)
     r.verifier("CLE-PARASITE-POSEE-A-LA-MAIN=" not in poses,
                "et le peer parasite est RETIRÉ — le diff porte sur l'interface",
                poses)
+    r.verifier(open(os.path.join(base, "etat", "peers.version")).read() == version_avant,
+               "la version mémorisée n'a pas bougé : un 304 n'en apporte pas")
     r.fin("G-03 diff sur wg show")
 
     # =========================================================================
@@ -408,6 +423,11 @@ try:
         for i in range(1, 451):
             f.write("CLE-KIT-%03d=\t(none)\t(none)\t10.200.1.%d/32\t17544763%02d\t1\t2\n"
                     % (i, i % 254 + 1, i % 100))
+    # On isole le chemin de REMONTÉE : sans table servie mémorisée,
+    # l'agent de passerelle n'applique rien, il se contente d'observer. Sinon la
+    # convergence — qui a raison — retirerait ces 450 peers que le serveur
+    # ne sert pas, avant même de lire leurs handshakes.
+    os.remove(os.path.join(base7, "etat", "peers.json"))
     marque = banc.marque_trace()
     acheve = banc.agent(base7, tours=1)
     envois = banc.requetes_depuis(marque, "/etat-tunnels")
@@ -440,6 +460,33 @@ try:
     # =========================================================================
     r.cas("G-09 — la version n'est mémorisée qu'APRÈS application",
           "annexe 3 §4.1")
+    # --- Le cas qui compte : l'application ÉCHOUE --------------------------
+    # `wg set` en échec, comme quand l'interface n'existe pas encore
+    # (couplage lâche §4.1). Mémoriser la version ici serait la panne
+    # silencieuse par excellence : le tour suivant recevrait un 304,
+    # l'agent de passerelle n'aurait plus rien à comparer, et la table
+    # resterait à moitié posée —
+    # pour toujours, sans une ligne de journal de plus.
+    base9ko = banc.sable("g09ko", peers=[], ipset=[])
+    acheve = banc.agent(base9ko, tours=1, extra={"BANC_WG_SET_KO": "1"})
+    version_ko = os.path.join(base9ko, "etat", "peers.version")
+    r.verifier("INCOMPLÈTE" in acheve.stderr.decode(),
+               "l'échec de pose est signalé", acheve.stderr.decode()[-300:])
+    r.verifier(banc.peers(base9ko) == [],
+               "rien n'a pu être posé", banc.peers(base9ko))
+    r.verifier(not os.path.exists(version_ko),
+               "et la version n'est PAS mémorisée — le tour suivant repull en 200",
+               os.listdir(os.path.join(base9ko, "etat")))
+
+    # Le même bac, la panne levée : le tour suivant converge et mémorise.
+    acheve = banc.agent(base9ko, tours=1)
+    r.verifier(dict(banc.peers(base9ko)),
+               "la panne levée, le tour suivant pose les peers",
+               banc.peers(base9ko))
+    r.verifier(os.path.exists(version_ko),
+               "et c'est LÀ que la version est mémorisée")
+
+    # --- Ce qui n'est PAS un échec d'application ---------------------------
     base9 = banc.sable("g09", peers=[], ipset=None)   # ipset ABSENTE
     banc.agent(base9, tours=1)
     version = os.path.join(base9, "etat", "peers.version")

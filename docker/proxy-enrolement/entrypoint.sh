@@ -11,7 +11,7 @@
 set -eu
 
 NOM="${NOM:?NOM non défini — gw-NN.gateway.<domaine>.tld}"
-API="${API:?API non définie — https://api.<domaine>}"
+API="${API:?API non définie — https://api.server.<domaine>.tld}"
 API_HOTE="$(printf '%s' "$API" | sed -e 's,^[a-z][a-z]*://,,' -e 's,[:/].*$,,')"
 TLS="${TLS_DIR:-/etc/proxy/tls}"
 
