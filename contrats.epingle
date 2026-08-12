@@ -14,5 +14,5 @@
 #                                      récupéré diverge de celui-ci)
 
 depot=https://github.com/consultom-dev/smartbureau-server.git
-commit=a968541b59eb82703eb666aea32c14859c6b04cf
+commit=4f55ddfb1320c2971d1528709422416145cc4eac
 fichier=contrats/openapi.yaml

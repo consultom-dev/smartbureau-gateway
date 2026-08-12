@@ -21,7 +21,7 @@
 
 repos:
   - repo: https://github.com/consultom-dev/smartbureau-server
-    rev: a968541b59eb82703eb666aea32c14859c6b04cf   # ← condensat à poser
+    rev: 4f55ddfb1320c2971d1528709422416145cc4eac   # suit contrats.epingle
     hooks:
       - id: lint-smartbureau
         stages: [pre-commit]

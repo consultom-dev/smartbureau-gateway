@@ -18,13 +18,19 @@ fichier=$(grep -E '^fichier=' "$epingle" | cut -d= -f2-)
 
 rm -rf "$destination"
 git clone --quiet --no-checkout --filter=blob:none "$depot" "$destination"
-git -C "$destination" checkout --quiet "$commit" -- "$fichier" 2>/dev/null \
+# Checkout DÉTACHÉ sur le commit épinglé — pas `checkout <commit> -- fichier`,
+# qui laisse HEAD sur la branche par défaut : la vérification ne passait
+# alors que si l'épingle ÉTAIT la tête du dépôt (bogue du lot 0, corrigé
+# à l'adoption du contrat au lot 2).
+git -C "$destination" checkout --quiet --detach "$commit" 2>/dev/null \
   || { echo "commit épinglé introuvable dans $depot : $commit" >&2; exit 3; }
 
-obtenu=$(git -C "$destination" rev-parse HEAD 2>/dev/null || echo "$commit")
-if [[ "$obtenu" != "$commit" && -n "$obtenu" ]]; then
+obtenu=$(git -C "$destination" rev-parse HEAD)
+if [[ "$obtenu" != "$commit" ]]; then
   echo "condensat divergent : attendu $commit, obtenu $obtenu" >&2
   exit 3
 fi
+[[ -f "$destination/$fichier" ]] \
+  || { echo "fichier absent au commit épinglé : $fichier" >&2; exit 3; }
 
 echo "contrat récupéré au commit $commit → $destination/$fichier"

@@ -1,0 +1,58 @@
+#!/bin/sh
+# =============================================================================
+# Rôle KIT — wg0 + watchdog + agent d'enrôlement (annexe 2 §3 ; arch. §6.2).
+#
+# Trois processus, une hiérarchie stricte :
+#   - wg0 : la conf est écrite par l'agent d'enrôlement à l'enrôlement
+#     (jamais provisionnée, jamais versionnée — elle porte la clé privée du
+#     kit). Au premier démarrage elle n'existe pas encore : on l'attend.
+#   - l'agent d'enrôlement (tranche 2) : machine à états annexe 2 §3.3 —
+#     il vit ICI, en netns hôte (piège 17 : sur le bridge services il
+#     serait enfermé par le fail-closed qu'il doit amorcer), et il porte
+#     aussi le re-poll, le canal descendant.
+#   - le watchdog (tranche 3) : bascule d'endpoint, indépendant de
+#     l'agent d'enrôlement (annexe 2, invariant 5) — il ne lit que
+#     endpoints.txt et port.
+#
+# Ce script n'écrit NI route NI règle (annexe 2 §3.5) : Table = off dans la
+# conf, le routage appartient au plancher reseau-hote, l'aiguillage à
+# parefeu. Et il n'invoque JAMAIS netfilter (arbitrage Q1).
+# =============================================================================
+set -eu
+. /usr/local/lib/wg/roles/commun.sh
+
+AGENT="/usr/local/lib/wg/agent-enrolement.sh"
+WATCHDOG="/usr/local/lib/wg/watchdog.sh"
+PIDS=""
+
+arreter() {
+  for p in $PIDS; do kill -TERM "$p" 2>/dev/null || true; done
+  descendre wg0
+  exit 0
+}
+trap arreter TERM INT
+
+# L'agent d'enrôlement d'abord : c'est lui qui écrit wg0.conf au premier
+# démarrage (état USINE). Tranche 2 — son absence n'empêche pas une maquette
+# de monter une conf déjà écrite.
+if [ -x "$AGENT" ]; then
+  "$AGENT" &
+  PIDS="$PIDS $!"
+fi
+
+# Attendre la conf (premier démarrage : l'enrôlement peut prendre le temps
+# du backoff 1→15 min — on ne borne pas, l'état se lit dans etat.json).
+until [ -f "$WG_CONF/wg0.conf" ]; do
+  sleep 5
+done
+monter wg0
+echo "wg(kit): wg0 montée (Table = off, MTU 1360 — arch. §6.2)" >&2
+
+# Le watchdog APRÈS wg0 : basculer l'endpoint d'une interface absente n'a
+# pas de sens ; et il survit seul ensuite (invariant 5).
+if [ -x "$WATCHDOG" ]; then
+  "$WATCHDOG" &
+  PIDS="$PIDS $!"
+fi
+
+tenir wg0
