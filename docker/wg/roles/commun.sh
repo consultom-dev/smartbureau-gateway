@@ -1,3 +1,8 @@
+# shellcheck shell=sh
+# Pas de shebang : ce fichier est SOURCÉ, jamais exécuté (le shebang
+# laisserait croire l'inverse). La directive ci-dessus dit à shellcheck
+# quel dialecte lire — sans elle il refuse d'analyser, et le contrôle
+# passait inaperçu tant que shellcheck manquait de l'environnement.
 # =============================================================================
 # Socle commun des trois rôles — sourcé, jamais exécuté.
 #
@@ -10,6 +15,25 @@
 
 WG_CONF="${WG_CONF:-/etc/wireguard}"
 
+# Applique une conf À CHAUD sur une interface DÉJÀ montée — jamais down/up :
+# la resynchronisation ne coupe pas le tunnel (annexe 2 §3.5, même exigence
+# pour la rotation de clé de passerelles §11.4). Seul propriétaire de ce
+# chemin : `monter` ci-dessous et l'agent d'enrôlement l'appellent tous deux.
+resynchroniser() { # $1 nom d'interface — montée, conf présente
+  # `wg-quick strip` CONSERVE la PrivateKey : le fichier temporaire porte
+  # la clé du kit (celle qui ne quitte jamais le kit, annexe 2 §3.2). Il
+  # naît donc en 600 (mktemp) et est effacé QUOI QU'IL ARRIVE — même si
+  # `wg syncconf` échoue et que set -e nous fait sortir. POSIX sh n'a pas
+  # de <(…), d'où le fichier ; il n'a pas de trap RETURN, d'où le nettoyage
+  # explicite avant chaque sortie.
+  strip="$(mktemp)"
+  wg-quick strip "$WG_CONF/$1.conf" > "$strip" \
+    || { rm -f "$strip"; return 1; }
+  wg syncconf "$1" "$strip" \
+    || { rm -f "$strip"; return 1; }
+  rm -f "$strip"
+}
+
 monter() { # $1 nom d'interface — la conf DOIT exister
   [ -f "$WG_CONF/$1.conf" ] || {
     echo "wg($WG_ROLE): $WG_CONF/$1.conf absent — rien à monter" >&2
@@ -17,22 +41,9 @@ monter() { # $1 nom d'interface — la conf DOIT exister
   }
   # Idempotent : un restart de conteneur retrouve l'interface déjà posée
   # dans le netns hôte — la re-poser serait un échec, pas une convergence.
-  # `wg syncconf` (jamais down/up) : la resynchronisation ne coupe pas le
-  # tunnel (annexe 2 §3.5, même exigence pour la rotation).
   if ip link show "$1" >/dev/null 2>&1; then
     echo "wg($WG_ROLE): $1 déjà montée — resynchronisation de la conf" >&2
-    # `wg-quick strip` CONSERVE la PrivateKey : le fichier temporaire porte
-    # la clé du kit (celle qui ne quitte jamais le kit, annexe 2 §3.2). Il
-    # naît donc en 600 (mktemp) et est effacé QUOI QU'IL ARRIVE — même si
-    # `wg syncconf` échoue et que set -e nous fait sortir. POSIX sh n'a pas
-    # de <(…), d'où le fichier ; il n'a pas de trap RETURN, d'où le nettoyage
-    # explicite avant chaque sortie.
-    strip="$(mktemp)"
-    wg-quick strip "$WG_CONF/$1.conf" > "$strip" \
-      || { rm -f "$strip"; return 1; }
-    wg syncconf "$1" "$strip" \
-      || { rm -f "$strip"; return 1; }
-    rm -f "$strip"
+    resynchroniser "$1"
   else
     wg-quick up "$WG_CONF/$1.conf"
   fi

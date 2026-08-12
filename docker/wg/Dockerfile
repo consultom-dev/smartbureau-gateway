@@ -22,8 +22,16 @@
 ARG BASE=debian:12-slim
 FROM ${BASE}
 
+# `ca-certificates` est EXPLICITE, et ce n'est pas un détail : il n'est qu'un
+# `Recommends` de libcurl, donc `--no-install-recommends` le laisse dehors.
+# Sans lui, l'image n'a aucune ancre publique et TOUT l'agent d'enrôlement
+# tombe en `curl 60` — `POST /enroler` compris. Aucun kit ne s'enrôlerait
+# jamais, et le raisonnement de l'arbitrage Q3 (« un nom de l'étage public
+# `gateway` est vérifiable par la chaîne publique, sans CA préinstallée »)
+# suppose précisément un magasin de confiance système.
 RUN apt-get update \
  && apt-get install --no-install-recommends -y \
+      ca-certificates \
       wireguard-tools iproute2 iputils-ping curl jq \
       iptables ipset conntrack procps \
  && rm -rf /var/lib/apt/lists/* \
@@ -35,6 +43,10 @@ RUN apt-get update \
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY roles/ /usr/local/lib/wg/roles/
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/lib/wg/roles/*.sh
+# L'agent d'enrôlement est voisin de `roles/` — il source `roles/commun.sh`
+# par un chemin RELATIF, le même dans l'image et dans le dépôt (annexe 2 §3.3).
+COPY agent-enrolement.sh /usr/local/lib/wg/agent-enrolement.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/lib/wg/roles/*.sh \
+             /usr/local/lib/wg/agent-enrolement.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

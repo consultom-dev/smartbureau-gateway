@@ -12,8 +12,15 @@ jamais la re-fragmenter par rôle (annexe 7 §1).
 
 Base Debian slim épinglée : `wireguard-tools`, `iproute2`, `iptables`
 (**backend nf_tables** — vérifié au démarrage, refus sinon : piège 9),
-`ipset`, `conntrack`, plus `iputils-ping`, `curl`, `jq` pour le rôle kit.
-`network_mode: host`, `cap_add: [NET_ADMIN, NET_RAW]`.
+`ipset`, `conntrack`, plus `iputils-ping`, `curl`, `jq` et
+**`ca-certificates`** pour le rôle kit. `network_mode: host`,
+`cap_add: [NET_ADMIN, NET_RAW]`.
+
+`ca-certificates` est **explicite**, et c'est le genre d'oubli qui ne se
+voit qu'en production : il n'est qu'un `Recommends` de libcurl, donc
+`--no-install-recommends` le laisse dehors. Sans lui, l'image n'a aucune
+ancre publique et tout l'agent d'enrôlement tombe en `curl 60` —
+`POST /enroler` compris, donc aucun kit ne s'enrôle jamais.
 
 L'**union** des besoins vit dans l'image unique (annexe 7 §1). Côté kit,
 « pas d'iptables » est une absence d'**usage**, pas de binaire (arbitrage
@@ -42,9 +49,26 @@ santé (§3.3).
 
 Configuration WireGuard (`0.0.0.0/0` **avec** `Table = off`, MTU 1360,
 keepalive 25), **watchdog** (ping de `10.100.0.1` toutes les 30 s,
-rotation dans `endpoints.txt`) et **agent d'enrôlement** : machine à états
-USINE → NOMINAL → SUSPENDU, écriture de l'état local et des blocs `pki`,
-`tls`, `registre` (annexe 2 §3.2, §3.3).
+rotation dans `endpoints.txt` — tranche 3) et **agent d'enrôlement**
+(`agent-enrolement.sh`, tranche 2).
+
+L'agent d'enrôlement porte la machine à états de l'annexe 2 §3.3 —
+`USINE` → `NOMINAL`, `SUSPENDU` et sa reprise, `IDENTITE_PERDUE` et ses
+trois branches — et l'écriture de l'état local du §3.2 : modes,
+propriétaires, **GID 3000 figé** (posé en numérique : le groupe naît sur
+l'hôte, l'image commune ne le connaît pas), blocs `pki`, `tls` et
+`registre`. Deux règles d'écriture, et la recette les vérifie : chaque
+fichier est posé **atomiquement**, et **le témoin s'écrit après ce qu'il
+atteste** — `usine.json` supprimé en dernier, `endpoints.version` écrit en
+dernier. Il possède `etat-agent.json` ; `etat.json`, celui que lit
+`sante`, appartient à la boucle de marqueurs (tranche 3) — un fichier
+atomique n'a **qu'un** propriétaire, sinon chaque `rename` efface les
+champs de l'autre. Il lit le fichier d'usine dans `controle/usine.json`, où
+`premier-demarrage` l'a déplacé depuis `/boot` (arbitrage Q2) : aucun
+conteneur ne monte la partition d'amorçage.
+
+C'est le seul script du dépôt **sans `set -e`**, et c'est délibéré : son
+métier est de survivre aux coupures 4G, pas de mourir dessus.
 
 ## Rôle `serveur` (lot 2)
 
@@ -70,5 +94,7 @@ NAT** — le serveur est une feuille.
   Docker et les redémarrages repoussent les règles.
 
 Recette : `tests/roles/` (R-01 … R-06, tranche 1 — les trois rôles
-montent), `tests/netfilter/` (P-01 … P-20, lot 4) et
-`tests/agent-enrolement/` (tranche 2).
+montent ; **sudo et module noyau `wireguard`**),
+`tests/agent-enrolement/` (A-01 … A-17, tranche 2 — la machine à états
+contre le mock ; **ni Docker ni module noyau**) et `tests/netfilter/`
+(P-01 … P-20, lot 4).

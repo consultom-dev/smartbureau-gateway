@@ -4,9 +4,14 @@
 
 | Répertoire | Contenu | Lot | Fait foi |
 |---|---|---|---|
+| `roles/` | les cas **R-01 … R-06** — les trois rôles montent leurs interfaces (**sudo + module noyau `wireguard`**) | 2 | annexe 7 §1, arch. §6.2 |
+| `agent-enrolement/` | les cas **A-01 … A-17** — la machine à états rejouée **contre le mock** (ni Docker ni module noyau) | 2 | annexe 2 §3.2 et §3.3 |
 | `netfilter/` | les cas **P-01 … P-20** sur le gabarit partagé | 4 | annexe 3 §8 |
-| `agent-enrolement/` | la machine à états rejouée **contre le mock** | 2 | annexe 2 §3.3 |
 | `agent-passerelle/` | la boucle : diff, 401, ipset | 4 | annexe 3 §4 |
+
+`tap.py` est le rapporteur commun aux recettes Python du projet (TAP, cas
+sautés **jamais verts**, chaque cas cite sa source) — même fichier que
+dans `smartbureau-edge`.
 
 Ce dépôt porte **deux critères de fini** :
 
