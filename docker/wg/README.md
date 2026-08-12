@@ -12,8 +12,15 @@ jamais la re-fragmenter par rôle (annexe 7 §1).
 
 Base Debian slim épinglée : `wireguard-tools`, `iproute2`, `iptables`
 (**backend nf_tables** — vérifié au démarrage, refus sinon : piège 9),
-`ipset`, `conntrack`, plus `iputils-ping`, `curl`, `jq` pour le rôle kit.
-`network_mode: host`, `cap_add: [NET_ADMIN, NET_RAW]`.
+`ipset`, `conntrack`, plus `iputils-ping`, `curl`, `jq` et
+**`ca-certificates`** pour le rôle kit. `network_mode: host`,
+`cap_add: [NET_ADMIN, NET_RAW]`.
+
+`ca-certificates` est **explicite**, et c'est le genre d'oubli qui ne se
+voit qu'en production : il n'est qu'un `Recommends` de libcurl, donc
+`--no-install-recommends` le laisse dehors. Sans lui, l'image n'a aucune
+ancre publique et tout l'agent d'enrôlement tombe en `curl 60` —
+`POST /enroler` compris, donc aucun kit ne s'enrôle jamais.
 
 L'**union** des besoins vit dans l'image unique (annexe 7 §1). Côté kit,
 « pas d'iptables » est une absence d'**usage**, pas de binaire (arbitrage
@@ -53,7 +60,10 @@ l'hôte, l'image commune ne le connaît pas), blocs `pki`, `tls` et
 `registre`. Deux règles d'écriture, et la recette les vérifie : chaque
 fichier est posé **atomiquement**, et **le témoin s'écrit après ce qu'il
 atteste** — `usine.json` supprimé en dernier, `endpoints.version` écrit en
-dernier. Il lit le fichier d'usine dans `controle/usine.json`, où
+dernier. Il possède `etat-agent.json` ; `etat.json`, celui que lit
+`sante`, appartient à la boucle de marqueurs (tranche 3) — un fichier
+atomique n'a **qu'un** propriétaire, sinon chaque `rename` efface les
+champs de l'autre. Il lit le fichier d'usine dans `controle/usine.json`, où
 `premier-demarrage` l'a déplacé depuis `/boot` (arbitrage Q2) : aucun
 conteneur ne monte la partition d'amorçage.
 
@@ -85,6 +95,6 @@ NAT** — le serveur est une feuille.
 
 Recette : `tests/roles/` (R-01 … R-06, tranche 1 — les trois rôles
 montent ; **sudo et module noyau `wireguard`**),
-`tests/agent-enrolement/` (A-01 … A-16, tranche 2 — la machine à états
+`tests/agent-enrolement/` (A-01 … A-17, tranche 2 — la machine à états
 contre le mock ; **ni Docker ni module noyau**) et `tests/netfilter/`
 (P-01 … P-20, lot 4).

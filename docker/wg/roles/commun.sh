@@ -1,3 +1,8 @@
+# shellcheck shell=sh
+# Pas de shebang : ce fichier est SOURCÉ, jamais exécuté (le shebang
+# laisserait croire l'inverse). La directive ci-dessus dit à shellcheck
+# quel dialecte lire — sans elle il refuse d'analyser, et le contrôle
+# passait inaperçu tant que shellcheck manquait de l'environnement.
 # =============================================================================
 # Socle commun des trois rôles — sourcé, jamais exécuté.
 #

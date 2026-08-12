@@ -59,7 +59,7 @@ ENDPOINTS="$CONTROLE/endpoints.txt"
 PORT="$CONTROLE/port"
 REPOLL="$CONTROLE/repoll.txt"
 VERSION="$CONTROLE/endpoints.version"
-ETAT="$CONTROLE/etat.json"
+ETAT="$CONTROLE/etat-agent.json"
 RELEASE="$CONTROLE/release_cible"
 APPLICATIF="$CONTROLE/applicatif.json"
 DOMAINES="$CONTROLE/domaines.json"
@@ -91,6 +91,8 @@ PORT_REPOLL="${AGENT_REPOLL_PORT:-}"
 BAC="$(mktemp -d)"
 REPONSE="$BAC/reponse"
 TRACE="$BAC/trace"
+CORPS="$BAC/corps.json"        # corps de POST /enroler — porte le secret d'usine
+PORTEUR="$BAC/porteur.conf"    # config curl — porte le secret d'API
 CODE=""
 backoff="$BACKOFF_MIN"
 
@@ -98,22 +100,44 @@ nettoyer() { rm -rf "$BAC"; }
 trap nettoyer EXIT
 trap 'nettoyer; exit 0' TERM INT
 
-journal() { echo "wg(agent-enrolement): $*" >&2; }
+journal() { printf 'wg(agent-enrolement): %s\n' "$*" >&2; }
 
 # --- Écriture d'état : atomique, mode et propriétaire compris --------------
+#
+# CONVENTION DE NOMMAGE — POSIX sh n'a pas de `local` : toute variable de
+# fonction est GLOBALE. Elles sont donc préfixées d'un `_` et l'espace de
+# noms est cloisonné par fonction : `poser` réserve `_chemin _mode _groupe
+# _rep _tmp` ; `appeler` réserve `_url _ip _rc _hote` ; `tour_usine`
+# réserve `_cle _pub _corps` ; `tour_repoll` réserve `_entree _porteur
+# _version _servi` ; `ecrire_wg0` réserve `_cle_wg0` ; `etat_ecrire`
+# réserve `_hs _ep`. Les deux fichiers sensibles du bac (`$CORPS`,
+# `$PORTEUR`) naissent en 600 et meurent avec le `trap`.
+# Une fonction n'écrit JAMAIS dans le préfixe d'une autre — c'est la seule
+# chose qui rende sûr d'appeler l'une depuis l'autre.
 
 poser() { # $1 chemin  $2 mode  $3 groupe (vide = aucun chown de groupe)
           # contenu sur l'entrée standard
   _chemin="$1"; _mode="$2"; _groupe="${3:-}"
   _rep="$(dirname "$_chemin")"
   mkdir -p "$_rep" || { journal "mkdir $_rep impossible"; return 1; }
-  _tmp="$_rep/.agent-tmp.$$"
+  # Temporaire UNIQUE par appel, jamais dérivé de `$$` : en dash, `$$` garde
+  # la valeur du shell père dans un sous-shell, si bien que deux `poser`
+  # imbriqués sur le même répertoire — cas réel : `ecrire_wg0` dont le tube
+  # déclenche la naissance de la clé privée — se partageaient le MÊME
+  # temporaire. Le `mv` de l'un arrachait le fichier sous le `cat` de
+  # l'autre : clé privée tronquée, puis écrasée, et plus jamais régénérée
+  # puisqu'elle existait. Un kit mort en silence, sans retour possible.
   # Le contenu peut être un secret : le temporaire naît en 600, AVANT la
   # première écriture. Élargir ensuite (640) est sûr ; l'inverse ne l'est pas.
-  ( umask 077; : > "$_tmp" ) || { journal "création $_tmp impossible"; return 1; }
+  _tmp="$(umask 077; mktemp "$_rep/.agent-tmp.XXXXXX")" \
+    || { journal "création d'un temporaire dans $_rep impossible"; return 1; }
   if ! cat > "$_tmp"; then
     rm -f "$_tmp"; journal "écriture $_chemin impossible"; return 1
   fi
+  # Durabilité AVANT publication : le raisonnement « le témoin après ce
+  # qu'il atteste » ne vaut que si le contenu a atteint le disque avant le
+  # `rename` qui le rend visible.
+  sync
   if ! chmod "$_mode" "$_tmp"; then
     rm -f "$_tmp"; journal "chmod $_mode $_chemin impossible"; return 1
   fi
@@ -149,12 +173,17 @@ retirer() { # $1 chemin — suppression durable
 
 lisible() { [ -r "$1" ] && [ -s "$1" ]; }
 
-# --- etat.json (annexe 2 §3.2) ---------------------------------------------
-# L'agent d'enrôlement possède `etat` et `code_config_kit` ; la boucle de
-# marqueurs (60 s, tranche 3) rafraîchira la vivacité. Le vocabulaire est
-# celui du tableau du §3.2 — `enrole` y nomme l'état NOMINAL du §3.3.
-# `wg show` n'est interrogé que si l'interface existe : au premier
-# démarrage elle n'existe pas encore, et ce n'est pas une anomalie.
+# --- etat-agent.json (annexe 2 §3.2) ---------------------------------------
+# UN SEUL PROPRIÉTAIRE PAR FICHIER. L'agent d'enrôlement possède
+# `etat-agent.json` ; `etat.json` — celui que lit `sante` — appartient à la
+# boucle de marqueurs (60 s, tranche 3), qui y recopie l'état d'ici. Deux
+# écrivains atomiques sur un même fichier ne se complètent pas : le dernier
+# `rename` efface les champs de l'autre, et l'agent d'enrôlement perdrait
+# SUSPENDU ou IDENTITE_PERDUE à chaque battement de 60 s.
+#
+# Le vocabulaire est celui du tableau du §3.2 — `enrole` y nomme l'état
+# NOMINAL du §3.3. `wg show` n'est interrogé que si l'interface existe : au
+# premier démarrage elle n'existe pas encore, et ce n'est pas une anomalie.
 etat_ecrire() { # $1 etat  $2 code HTTP (ou "-")  $3 détail libre
   _hs=0
   _ep=""
@@ -235,8 +264,15 @@ cle_privee() {
 # wg-quick de poser la route par défaut qui basculerait TOUT le kit dans le
 # tunnel. Le fichier porte la clé privée du kit : 600.
 ecrire_wg0() { # $1 adresse/32  $2 clé publique passerelles  $3 endpoint  $4 port
+  # La clé est lue AVANT le tube : `cle_privee` peut avoir à la générer,
+  # donc à appeler `poser` — un `poser` dans le tube d'un autre `poser`. Et
+  # une substitution vide écrirait ici une `PrivateKey = ` en rendant 0,
+  # c'est-à-dire une conf inutilisable sur laquelle `tour_usine`
+  # supprimerait quand même `usine.json`.
+  _cle_wg0="$(cle_privee)"
+  [ -n "$_cle_wg0" ] || { journal "clé privée indisponible — wg0.conf non écrite"; return 1; }
   { printf '[Interface]\n'
-    printf 'PrivateKey = %s\n' "$(cle_privee)"
+    printf 'PrivateKey = %s\n' "$_cle_wg0"
     printf 'Address = %s\n' "$1"
     printf 'MTU = 1360\n'
     printf 'Table = off\n'
@@ -284,8 +320,13 @@ tour_usine() {
   _cle="$(cle_privee)"
   [ -n "$_cle" ] || { journal "clé privée indisponible — rien à tenter"; return 1; }
   _pub="$(printf '%s\n' "$_cle" | wg pubkey)"
-  _corps="$(jq -n --arg s "$(jq -r '.secret' "$USINE")" --arg c "$_pub" \
-                  '{secret:$s, cle_publique:$c}')"
+  # Le secret d'usine passe par un FICHIER (600), jamais par l'argv : le
+  # conteneur `wg` est en netns hôte, et `/proc/<pid>/cmdline` est lisible
+  # bien plus largement qu'un fichier. Même raison que l'interdiction de le
+  # journaliser (annexe 3 §5).
+  ( umask 077
+    jq -n --arg s "$(jq -r '.secret' "$USINE")" --arg c "$_pub" \
+          '{secret:$s, cle_publique:$c}' > "$CORPS" ) || return 1
 
   # Chaque URL du tableau `enrolement`, dans l'ordre ; l'IP de repli est
   # celle du couple `repli` qui porte le même hôte. Le `while` tourne dans
@@ -295,7 +336,7 @@ tour_usine() {
   jq -r '.enrolement[]?' "$USINE" | while read -r url; do
     _hote="$(hote_de_url "$url")"
     _ip="$(jq -r --arg h "$_hote" '.repli[]? | select(.hote == $h) | .ip' "$USINE" | head -1)"
-    appeler "$url" "$_ip" -X POST -H 'Content-Type: application/json' -d "$_corps"
+    appeler "$url" "$_ip" -X POST -H 'Content-Type: application/json' -d "@$CORPS"
     case "$CODE" in
       200) : > "$BAC/enrole"; break ;;
       403)
@@ -332,8 +373,18 @@ tour_usine() {
   poser_valeur "$(jq -c '.applicatif // empty' "$REPONSE")" "$APPLICATIF" 640 "$GID_LECTURE" || return 1
   poser_valeur "$(jq -c '.domaines // empty' "$REPONSE")" "$DOMAINES" 644 || return 1
   poser_valeur "$(jq -r '.version // empty' "$REPONSE")" "$VERSION" 644 || return 1
-  retirer "$USINE" || return 1
-  journal "enrôlé : $(jq -r '.kit_id' "$REPONSE") — usine.json supprimé (invariant 2)"
+  journal "enrôlé : $(jq -r '.kit_id' "$REPONSE") — identité durable"
+  # `usine.json` EN DERNIER : le point de non-retour (invariant 2). Si la
+  # suppression échoue — montage passé en lecture seule, carte SD en
+  # détresse — l'enrôlement n'en est pas moins RÉUSSI : le signaler comme
+  # un échec ferait rejouer `/enroler` à chaque battement, et chaque rejeu
+  # réémet un `secret_api` en invalidant le précédent (annexe 1 §6.1).
+  # C'est `deduire_etat` qui retentera la seule chose qui reste à faire.
+  if retirer "$USINE"; then
+    journal "usine.json supprimé (invariant 2)"
+  else
+    journal "ALERTE : usine.json NON supprimé — le secret d'usine survit sur le kit"
+  fi
   appliquer_wg0
   etat_ecrire enrole 200 "enrôlement réussi"
   return 0
@@ -352,7 +403,12 @@ tour_repoll() { # $1 état d'entrée
     etat_ecrire identite_perdue "-" "secret_api absent ou illisible — ré-enrôlement en atelier"
     return 1
   fi
-  _porteur="$(cat "$SECRET_API")"
+  # Le porteur passe par un fichier de configuration curl (600) — même
+  # raison que le secret d'usine ci-dessus : hors de l'argv.
+  ( umask 077
+    printf 'header = "Authorization: Bearer %s"\n' \
+           "$(sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' "$SECRET_API" | head -1)" \
+      > "$PORTEUR" ) || return 1
   _version=""
   [ -r "$VERSION" ] && _version="$(cat "$VERSION")"
 
@@ -361,8 +417,7 @@ tour_repoll() { # $1 état d'entrée
     while read -r hote ip; do
       [ -n "${hote:-}" ] || continue
       _url="$SCHEMA://$hote${PORT_REPOLL:+:$PORT_REPOLL}/config-kit"
-      appeler "$_url" "${ip:-}" -H "Authorization: Bearer $_porteur" \
-                                -H "X-Version: $_version"
+      appeler "$_url" "${ip:-}" --config "$PORTEUR" -H "X-Version: $_version"
       case "$CODE" in 200|304|401|403) _servi="$CODE"; break ;; *) : ;; esac
     done < "$REPOLL"
   else
@@ -456,13 +511,42 @@ appliquer_config_kit() {
 # enrôlement à faire » — y compris quand on y arrive depuis IDENTITE_PERDUE,
 # ce qui est précisément la première branche de l'arbitrage Q6.
 deduire_etat() {
-  if [ -f "$USINE" ]; then echo usine; return; fi
-  if ! lisible "$SECRET_API"; then echo identite_perdue; return; fi
-  _memorise="$(jq -r '.etat // "enrole"' "$ETAT" 2>/dev/null)"
+  _memorise="$(jq -r '.etat // "usine"' "$ETAT" 2>/dev/null)"
+  case "$_memorise" in usine|enrole|suspendu|identite_perdue) : ;; *) _memorise=usine ;; esac
+  if [ -f "$USINE" ]; then
+    # `usine.json` présent ET un enrôlement déjà abouti (porteur lisible,
+    # état mémorisé `enrole` ou `suspendu`) : seule la SUPPRESSION a
+    # échoué. Rejouer `/enroler` ici réémettrait un `secret_api` à chaque
+    # battement en invalidant le précédent (annexe 1 §6.1) — une boucle de
+    # brûlage silencieuse. On reste dans l'état atteint ; la suppression
+    # est retentée au tour suivant.
+    case "$_memorise" in
+      enrole|suspendu) lisible "$SECRET_API" && { printf '%s\n' "$_memorise"; return; } ;;
+      *) : ;;
+    esac
+    # Tous les autres cas mènent à USINE — `identite_perdue` compris :
+    # c'est la première branche de l'arbitrage Q6, « l'amorce est encore
+    # là, on retente l'enrôlement ».
+    printf 'usine\n'; return
+  fi
+  if ! lisible "$SECRET_API"; then printf 'identite_perdue\n'; return; fi
   case "$_memorise" in
-    suspendu|identite_perdue) echo "$_memorise" ;;
-    *) echo enrole ;;
+    suspendu|identite_perdue) printf '%s\n' "$_memorise" ;;
+    *) printf 'enrole\n' ;;
   esac
+}
+
+# Le point de non-retour, retenté : un `usine.json` qui survit à un
+# enrôlement abouti est un secret d'usine vivant sur le kit — exactement ce
+# qu'un voleur cherche (invariant 2). On ne rejoue pas l'enrôlement pour
+# autant : on ne retente que la suppression.
+finir_enrolement() {
+  [ -f "$USINE" ] || return 0
+  if retirer "$USINE"; then
+    journal "usine.json enfin supprimé (suppression retardée — invariant 2)"
+  else
+    journal "ALERTE : usine.json toujours pas supprimé — le secret d'usine survit sur le kit"
+  fi
 }
 
 journal "démarrage — contrôle=$CONTROLE conf=$WG_CONF (annexe 2 §3.3)"
@@ -485,6 +569,7 @@ while :; do
         [ "$backoff" -gt "$BACKOFF_MAX" ] && backoff="$BACKOFF_MAX"
       fi ;;
     suspendu)
+      finir_enrolement
       tour_repoll suspendu
       attente="$PERIODE_SUSPENDU" ;;
     *)
@@ -492,6 +577,7 @@ while :; do
       # NOMINALE. C'est tout l'arbitrage N-1 : une identité perdue est une
       # panne, pas une décision d'administration — le ralenti de 24 h y
       # transformerait une carte SD fatiguée en kit définitivement perdu.
+      finir_enrolement
       tour_repoll "$etat"
       attente="$PERIODE_NOMINALE" ;;
   esac

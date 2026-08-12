@@ -82,7 +82,7 @@ sudo ./tests/roles/lancer.sh              # R-01 … R-06
 # Tranche 2 — la machine à états de l'agent d'enrôlement, contre le mock
 # Ni Docker ni module noyau : root, python3, curl, jq
 sudo SMARTBUREAU_SERVER=/chemin/vers/smartbureau-server \
-     ./tests/agent-enrolement/lancer.py   # A-01 … A-16
+     ./tests/agent-enrolement/lancer.py   # A-01 … A-17
 
 # Le lint partagé (il vit dans smartbureau-server)
 SMARTBUREAU_SERVER=… /chemin/vers/smartbureau-server/outillage/lint/lint.sh

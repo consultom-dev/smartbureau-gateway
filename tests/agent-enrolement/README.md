@@ -21,7 +21,7 @@ IDENTITE_PERDUE  cadence NOMINALE ; amorce présente → re-enrôler ;
 ## Lancer
 
 ```bash
-sudo ./tests/agent-enrolement/lancer.py                    # A-01 … A-16
+sudo ./tests/agent-enrolement/lancer.py                    # A-01 … A-17
 sudo SMARTBUREAU_SERVER=/chemin/vers/smartbureau-server \
      ./tests/agent-enrolement/lancer.py
 ```
@@ -40,9 +40,20 @@ WireGuard : `wg`, `wg-quick` et `ip` sont des doublures qui **journalisent
 leurs appels** (`banc.py`). C'est ce journal qui rend vérifiable ce qu'une
 interface réelle cacherait — qu'une clé privée n'est générée **qu'une
 fois**, et qu'une rotation passe par `wg syncconf` et **jamais** par un
-`wg-quick down`. Les interfaces, elles, sont l'affaire de `tests/roles/`.
+`wg-quick down`. Une quatrième doublure, `mv`, fait échouer la
+**publication** d'un fichier désigné : c'est le seul moyen d'observer
+l'ORDRE des écritures plutôt que leur seul résultat (A-17). Les
+interfaces, elles, sont l'affaire de `tests/roles/`.
 
-## Les seize cas
+**TLS n'est exercé qu'en A-13**, où le banc pose devant le mock une
+terminaison TLS et une CA de banc (`openssl` requis, sinon le cas se
+déclare sauté). Ailleurs le banc parle en clair, comme le mock. Ce qu'A-13
+prouve alors est ce que l'arbitrage Q3 promet, et rien de moins : le repli
+joint l'IP en gardant le nom — un agent d'enrôlement qui réécrirait l'URL
+verrait le certificat ne plus correspondre —, et la vérification est
+réelle, puisque la même requête **échoue** contre une ancre étrangère.
+
+## Les dix-sept cas
 
 | Cas | Ce qu'il prouve | Source |
 |---|---|---|
@@ -61,7 +72,8 @@ fois**, et qu'une rotation passe par `wg syncconf` et **jamais** par un
 | **A-13** | repli sur l'IP : le **nom** est conservé, aucune empreinte épinglée | arbitrage Q3 |
 | **A-14** | rotation de clé : `wg syncconf`, jamais `down`/`up` ; le fichier `port` suit | arch. §11.4, arbitrage N4 |
 | **A-15** | `500`, temporisation, API morte : on garde tout et on retente | invariant 6 de l'annexe 3 |
-| **A-16** | les cadences par défaut sont celles du corpus (6 h / 24 h / 1→15 min) | §3.3 |
+| **A-16** | les cadences par défaut du script sont celles du corpus — 6 h / 24 h / 1→15 min (lecture du source) | §3.3 |
+| **A-17** | l'**ordre** des écritures : une séquence interrompue laisse `usine.json` en place, et le tour suivant reprend | invariant 2, arbitrage Q2 |
 
 Les cinq modes de coupure du mock sont tous employés : `avant` (A-04),
 `apres` (A-03), `erreur_500`, `temporisation` et `ecoute_fermee` (A-15).

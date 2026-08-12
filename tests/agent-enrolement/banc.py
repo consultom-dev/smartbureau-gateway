@@ -37,9 +37,11 @@ import os
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -98,6 +100,19 @@ esac
 exit 0
 """
 
+# `mv` est le geste qui PUBLIE un fichier d'état (`poser`). Le faire échouer
+# sur un fichier désigné est le seul moyen d'observer l'ORDRE des écritures
+# : une séquence interrompue au milieu doit laisser `usine.json` en place.
+DOUBLURE_MV = """#!/bin/sh
+if [ -n "${BANC_MV_ECHOUE:-}" ]; then
+  for destination in "$@"; do :; done
+  case "${destination##*/}" in
+    "$BANC_MV_ECHOUE") echo "mv: échec simulé par le banc" >&2; exit 1 ;;
+  esac
+fi
+exec %(mv)s "$@"
+"""
+
 
 class Banc:
     def __init__(self):
@@ -105,7 +120,8 @@ class Banc:
         self.doublures = os.path.join(self.racine, "doublures")
         os.makedirs(self.doublures)
         for nom, contenu in (("wg", DOUBLURE_WG), ("wg-quick", DOUBLURE_WG_QUICK),
-                             ("ip", DOUBLURE_IP)):
+                             ("ip", DOUBLURE_IP),
+                             ("mv", DOUBLURE_MV % {"mv": shutil.which("mv") or "/bin/mv"})):
             chemin = os.path.join(self.doublures, nom)
             with open(chemin, "w") as f:
                 f.write(contenu)
@@ -114,6 +130,10 @@ class Banc:
         self.port_proxy = port_libre()
         self.processus = None
         self.trace = os.path.join(self.racine, "mock.trace")
+        self.tls_arret = None
+        self.tls_ecoute = None
+        self.tls_ca = None
+        self.tls_ca_etrangere = None
 
     # --- Le mock ------------------------------------------------------------
 
@@ -141,8 +161,29 @@ class Banc:
             cwd=source, stdout=self.journal_mock, stderr=subprocess.STDOUT)
         return self.attendre_mock()
 
+    def joignable(self):
+        """Les DEUX surfaces répondent-elles ?
+
+        Le pilotage ne suffit pas : les écoutes se ferment et se rouvrent
+        indépendamment, et c'est la surface proxy que l'agent d'enrôlement
+        emploie. Sur le proxy, un `401` est une réponse — donc une écoute
+        vivante.
+        """
+        try:
+            self.pilotage("GET", "/_mock/sante")
+        except Exception:
+            return False
+        try:
+            urllib.request.urlopen(
+                "http://127.0.0.1:%d/config-kit" % self.port_proxy, timeout=5).read()
+        except urllib.error.HTTPError:
+            return True
+        except Exception:
+            return False
+        return True
+
     def attendre_mock(self, secondes=20):
-        """Attend que le mock réponde.
+        """Attend que le mock réponde de nouveau.
 
         Le mode de coupure `ecoute_fermee` ferme TOUTES les écoutes, pilotage
         compris — c'est le but, et elles se rouvrent seules. Le banc attend
@@ -150,14 +191,34 @@ class Banc:
         """
         limite = time.time() + secondes
         while time.time() < limite:
-            try:
-                self.pilotage("GET", "/_mock/sante")
+            if self.joignable():
                 return True
-            except Exception:
-                time.sleep(0.1)
+            time.sleep(0.1)
+        return False
+
+    def attendre_mock_ferme(self, secondes=10):
+        """Attend que les écoutes soient EFFECTIVEMENT fermées.
+
+        `fermer_puis_rouvrir` laisse d'abord partir la réponse de pilotage :
+        la fermeture est différée de quelques dixièmes de seconde. Enchaîner
+        sans attendre ferait courir l'agent d'enrôlement AVANT la coupure —
+        un cas vert qui n'aurait rien coupé, et une fermeture qui
+        retomberait au milieu du cas suivant.
+        """
+        limite = time.time() + secondes
+        while time.time() < limite:
+            if not self.joignable():
+                return True
+            time.sleep(0.1)
         return False
 
     def arreter(self):
+        if self.tls_arret:
+            self.tls_arret.set()
+            try:
+                self.tls_ecoute.close()
+            except OSError:
+                pass
         if self.processus:
             self.processus.send_signal(signal.SIGTERM)
             try:
@@ -200,6 +261,109 @@ class Banc:
             f.seek(marque)
             return [l for l in f.read().splitlines() if motif in l and "->" in l]
 
+    # --- TLS : la seule façon de prouver l'arbitrage Q3 --------------------
+    #
+    # Le mock parle en clair (c'est assumé : la terminaison TLS appartient au
+    # proxy d'enrôlement, jamais à l'application). Or Q3 porte précisément
+    # sur ce que le repli fait de TLS — SNI, chaîne, nom conservé. Le banc
+    # pose donc devant le mock une terminaison TLS avec un certificat au nom
+    # `gw-01.gateway.smartbureau.example`, signé par une CA de banc.
+    #
+    # Ce que ce montage rend OBSERVABLE : si l'agent d'enrôlement joignait
+    # l'IP en réécrivant l'URL au lieu d'employer `--resolve`, le certificat
+    # ne correspondrait plus (aucun SAN sur l'IP) et l'appel échouerait. Et
+    # s'il désactivait la vérification, l'essai à la CA ÉTRANGÈRE réussirait
+    # au lieu d'échouer. Les deux mutations sont donc rouges.
+
+    def certificats(self):
+        """CA de banc + certificat du nom `gw-01…`, et une CA étrangère."""
+        rep = os.path.join(self.racine, "tls")
+        os.makedirs(rep, exist_ok=True)
+        nom = "gw-01.gateway.smartbureau.example"
+        extension = os.path.join(rep, "ext.cnf")
+        with open(extension, "w") as f:
+            f.write("subjectAltName=DNS:%s\nbasicConstraints=CA:FALSE\n" % nom)
+
+        def ouvrir(*args):
+            subprocess.run(args, cwd=rep, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        for prefixe, sujet in (("ca", "/CN=CA du banc agent-enrolement"),
+                               ("etrangere", "/CN=CA etrangere du banc")):
+            ouvrir("openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                   "-keyout", prefixe + ".key", "-out", prefixe + ".pem",
+                   "-days", "1", "-subj", sujet)
+        ouvrir("openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes",
+               "-keyout", "serveur.key", "-out", "serveur.csr", "-subj", "/CN=" + nom)
+        ouvrir("openssl", "x509", "-req", "-in", "serveur.csr",
+               "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
+               "-out", "serveur.pem", "-days", "1", "-extfile", "ext.cnf")
+        return (os.path.join(rep, "ca.pem"), os.path.join(rep, "etrangere.pem"),
+                os.path.join(rep, "serveur.pem"), os.path.join(rep, "serveur.key"))
+
+    def demarrer_tls(self):
+        """Terminaison TLS devant la surface proxy. Rend le port, ou None."""
+        if not shutil.which("openssl"):
+            return None
+        try:
+            ca, etrangere, cert, cle = self.certificats()
+        except (subprocess.CalledProcessError, OSError):
+            return None
+        contexte = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        contexte.load_cert_chain(cert, cle)
+        ecoute = socket.socket()
+        ecoute.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        ecoute.bind(("127.0.0.1", 0))
+        ecoute.listen(16)
+        ecoute.settimeout(0.5)
+        self.tls_ecoute = ecoute
+        self.tls_ca, self.tls_ca_etrangere = ca, etrangere
+        self.tls_arret = threading.Event()
+
+        def pomper(source, destination):
+            try:
+                while True:
+                    bloc = source.recv(65536)
+                    if not bloc:
+                        break
+                    destination.sendall(bloc)
+            except OSError:
+                pass
+            finally:
+                for s in (source, destination):
+                    try:
+                        s.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
+        def servir(brut):
+            try:
+                chiffre = contexte.wrap_socket(brut, server_side=True)
+            except (ssl.SSLError, OSError):
+                brut.close()
+                return
+            try:
+                amont = socket.create_connection(("127.0.0.1", self.port_proxy))
+            except OSError:
+                chiffre.close()
+                return
+            threading.Thread(target=pomper, args=(chiffre, amont), daemon=True).start()
+            pomper(amont, chiffre)
+
+        def boucle():
+            while not self.tls_arret.is_set():
+                try:
+                    brut, _ = ecoute.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                threading.Thread(target=servir, args=(brut,), daemon=True).start()
+
+        self.tls_fil = threading.Thread(target=boucle, daemon=True)
+        self.tls_fil.start()
+        return ecoute.getsockname()[1]
+
     # --- Le bac à sable d'un cas -------------------------------------------
 
     def sable(self, nom):
@@ -211,7 +375,8 @@ class Banc:
         return base, controle, conf
 
     def poser_usine(self, controle, hote="gw-01.gateway.smartbureau.example",
-                    secret="secret-usine-A0001-de-developpement", resoluble=False):
+                    secret="secret-usine-A0001-de-developpement", resoluble=False,
+                    tls=None):
         """Le fichier d'usine, à son domicile d'USAGE (arbitrage Q2).
 
         `controle/usine.json` en `600 root` : c'est `premier-demarrage` qui
@@ -220,10 +385,11 @@ class Banc:
         exactement ce que l'agent d'enrôlement trouve.
         """
         nom = "localhost" if resoluble else hote
+        schema, port = ("https", tls) if tls else ("http", self.port_proxy)
         usine = {
             "kit_id": "A0001",
             "secret": secret,
-            "enrolement": ["http://%s:%d/enroler" % (nom, self.port_proxy)],
+            "enrolement": ["%s://%s:%d/enroler" % (schema, nom, port)],
             "repli": [{"hote": nom, "ip": "127.0.0.1"}],
             "empreinte_tls": "sha256/RmF1eEVtcHJlaW50ZURlRGV2ZWxvcHBlbWVudEFBQUE=",
             "local": {"wifi_psk": "psk-de-developpement"},
@@ -238,7 +404,7 @@ class Banc:
     # --- L'agent d'enrôlement ----------------------------------------------
 
     def agent(self, base, controle, conf, tours=1, nominale=0, suspendu=0,
-              backoff=0, timeout=120):
+              backoff=0, timeout=120, mv_echoue=None, tls=None, ca=None):
         """Lance l'agent d'enrôlement tel qu'il tourne sur le kit : `sh`, root, curl, jq.
 
         Les cadences du corpus (6 h / 24 h / 1→15 min) sont surchargées :
@@ -267,6 +433,16 @@ class Banc:
             "BANC_COMPTEUR": os.path.join(base, "compteur-genkey"),
             "BANC_WG0_MONTEE": os.path.join(base, "wg0-montee"),
         })
+        if mv_echoue:
+            environnement["BANC_MV_ECHOUE"] = mv_echoue
+        if tls:
+            # Le re-poll parle alors HTTPS à la terminaison TLS du banc, avec
+            # la seule ancre que le banc lui donne (`CURL_CA_BUNDLE` tient ici
+            # la place du magasin système de l'image).
+            environnement["AGENT_REPOLL_SCHEMA"] = "https"
+            environnement["AGENT_REPOLL_PORT"] = str(tls)
+        if ca:
+            environnement["CURL_CA_BUNDLE"] = ca
         debut = time.time()
         acheve = subprocess.run(["sh", AGENT], env=environnement, timeout=timeout,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)

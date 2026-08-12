@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # =============================================================================
-# Cas A-01 … A-16 — la machine à états de l'agent d'enrôlement, rejouée
+# Cas A-01 … A-17 — la machine à états de l'agent d'enrôlement, rejouée
 # contre le mock du plan de contrôle (critère de fini 1 du lot 2, plan §4 :
 # « la machine à états est rejouée contre le mock, avec des coupures
 # simulées à chaque étape et une reprise idempotente »).
@@ -58,7 +58,7 @@ if MOTIF:
             "A-09 suspension et reprise", "A-10 identité perdue",
             "A-11 identité perdue avec amorce", "A-12 identité perdue sans porteur",
             "A-13 repli sur l'IP", "A-14 rotation de clé", "A-15 coupures",
-            "A-16 cadences et invariant 6"], 1):
+            "A-16 cadences et invariant 6", "A-17 ordre des écritures"], 1):
         r.cas(nom, "annexe 2 §3.3")
         r.sauter(nom, MOTIF)
     sortir(r)
@@ -96,7 +96,7 @@ try:
         "port": ("644", None),
         "repoll.txt": ("644", None),
         "endpoints.version": ("644", None),
-        "etat.json": ("644", None),
+        "etat-agent.json": ("644", None),
     }
     for nom, (attendu, groupe) in attendus.items():
         chemin = os.path.join(controle, nom)
@@ -128,8 +128,8 @@ try:
     r.verifier("Table = off" in conf_wg0 and "AllowedIPs = 0.0.0.0/0" in conf_wg0,
                "wg0.conf : AllowedIPs = 0.0.0.0/0 AVEC Table = off (piège 11)")
     r.verifier("MTU = 1360" in conf_wg0, "wg0.conf : MTU 1360 (arch. §6.2)")
-    r.verifier(lire_json(os.path.join(controle, "etat.json"))["etat"] == "enrole",
-               "etat.json annonce l'état enrole (§3.2)")
+    r.verifier(lire_json(os.path.join(controle, "etat-agent.json"))["etat"] == "enrole",
+               "etat-agent.json annonce l'état enrole (§3.2)")
     r.fin("A-01 enrôlement")
 
     # =========================================================================
@@ -201,8 +201,8 @@ try:
     etat_mock = banc.pilotage("GET", "/_mock/etat")
     kit = [k for k in etat_mock["kits"] if k["kit_id"] == "A0001"][0]
     r.verifier(kit["etat"] == "fabrique", "côté serveur, aucune transition", kit["etat"])
-    r.verifier(lire_json(os.path.join(controle, "etat.json"))["etat"] == "usine",
-               "etat.json reste en usine")
+    r.verifier(lire_json(os.path.join(controle, "etat-agent.json"))["etat"] == "usine",
+               "etat-agent.json reste en usine")
     banc.pilotage("POST", "/_mock/coupure/effacer", {})
     banc.agent(base, controle, conf, tours=1)
     r.verifier(not os.path.exists(os.path.join(controle, "usine.json")),
@@ -222,9 +222,9 @@ try:
                "trois tours = trois tentatives : un 403 d'usine n'est pas terminal",
                tentatives)
     r.verifier(all("-> 403" in t for t in tentatives), "chacune refusée en 403", tentatives)
-    etat = lire_json(os.path.join(controle, "etat.json"))
+    etat = lire_json(os.path.join(controle, "etat-agent.json"))
     r.verifier(etat["etat"] == "usine" and etat["code_config_kit"] == "403",
-               "etat.json porte l'alerte locale, l'état reste usine", etat)
+               "etat-agent.json porte l'alerte locale, l'état reste usine", etat)
     r.verifier(os.path.exists(os.path.join(controle, "usine.json")),
                "usine.json conservé — il n'y a rien eu à consommer")
     r.fin("A-05 403 d'enrôlement")
@@ -278,11 +278,14 @@ try:
     appels = banc.requetes_depuis(marque, "/config-kit")
     r.verifier(appels and "-> 304" in appels[0], "re-poll suivant : 304", appels)
     apres = empreintes(controle)
-    touches = [n for n in apres
-               if n != "etat.json" and avant.get(n) != apres.get(n)]
-    r.verifier(not touches, "aucun fichier d'état réécrit sur un 304", touches)
-    r.verifier(lire_json(os.path.join(controle, "etat.json"))["code_config_kit"] == "304",
-               "seul etat.json est rafraîchi — « la fraîcheur vaut vie »")
+    # On itère sur la RÉFÉRENCE : un fichier d'état SUPPRIMÉ par un 304 est
+    # au moins aussi grave qu'un fichier réécrit, et n'apparaîtrait pas si
+    # l'on parcourait l'état d'arrivée.
+    touches = [n for n in avant
+               if n != "etat-agent.json" and avant.get(n) != apres.get(n)]
+    r.verifier(not touches, "aucun fichier d'état réécrit ni supprimé sur un 304", touches)
+    r.verifier(lire_json(os.path.join(controle, "etat-agent.json"))["code_config_kit"] == "304",
+               "seul etat-agent.json est rafraîchi — « la fraîcheur vaut vie »")
     r.fin("A-07 re-poll 304")
 
     # =========================================================================
@@ -295,12 +298,16 @@ try:
     r.verifier(mode(chemin) == "644", "release_cible en 644 — l'updater la lit")
     source = lire(os.path.join(os.path.dirname(ICI), "..", "docker", "wg",
                                "agent-enrolement.sh"))
+    # Sur le CODE seul : les lignes de commentaire sont retirées, jamais
+    # leur marqueur (l'enlever rendrait les commentaires détectables, soit
+    # l'inverse de ce qu'on veut).
+    code = "\n".join(l for l in source.splitlines() if not l.lstrip().startswith("#"))
     interdits = [m for m in ("docker ", "docker-compose", "compose ", "systemctl", "apt-get")
-                 if m in source.replace("dockerd", "").replace("# ", "")]
+                 if m in code.replace("dockerd", "")]
     r.verifier(not interdits,
                "l'agent d'enrôlement n'invoque aucun outil de déploiement (invariant 6)",
                interdits)
-    r.verifier("iptables" not in source and "ipset" not in source and "nft " not in source,
+    r.verifier("iptables" not in code and "ipset" not in code and "nft " not in code,
                "et il n'invoque jamais netfilter (arbitrage Q1)")
     r.fin("A-08 release_cible")
 
@@ -309,14 +316,14 @@ try:
           "annexe 2 §3.3 et invariant 4 ; annexe 1 §4.4")
     banc.admin("POST", "/kits/A0001/suspendre", {})
     banc.agent(base, controle, conf, tours=1)
-    etat = lire_json(os.path.join(controle, "etat.json"))
+    etat = lire_json(os.path.join(controle, "etat-agent.json"))
     r.verifier(etat["etat"] == "suspendu" and etat["code_config_kit"] == "403",
                "un 403 fait basculer en SUSPENDU", etat)
     r.verifier(os.path.exists(os.path.join(conf, "wg0.conf")),
                "rien n'est purgé : le kit ne se débranche jamais tout seul")
     banc.admin("POST", "/kits/A0001/reprendre", {})
     banc.agent(base, controle, conf, tours=1)
-    etat = lire_json(os.path.join(controle, "etat.json"))
+    etat = lire_json(os.path.join(controle, "etat-agent.json"))
     r.verifier(etat["etat"] == "enrole",
                "le re-poll ne s'est jamais arrêté : il détecte la reprise (invariant 4)", etat)
     r.fin("A-09 suspension et reprise")
@@ -330,26 +337,42 @@ try:
     with open(os.path.join(controle, "secret_api"), "w") as f:
         f.write("porteur-que-le-serveur-ne-connait-pas")
     banc.agent(base, controle, conf, tours=1)
-    etat = lire_json(os.path.join(controle, "etat.json"))
+    etat = lire_json(os.path.join(controle, "etat-agent.json"))
     r.verifier(etat["etat"] == "identite_perdue" and etat["code_config_kit"] == "401",
                "un 401 mène à IDENTITE_PERDUE, jamais à SUSPENDU", etat)
     apres = empreintes(controle)
     touches = [n for n in avant
-               if n not in ("etat.json", "secret_api") and avant.get(n) != apres.get(n)]
+               if n not in ("etat-agent.json", "secret_api") and avant.get(n) != apres.get(n)]
     r.verifier(not touches, "aucune purge : endpoints, conf et blocs restent en place", touches)
 
-    # La cadence, mesurée : trois tours en IDENTITE_PERDUE doivent coûter la
-    # période NOMINALE, jamais le ralenti de 24 h. C'est l'invariant 4.
-    _, duree_perdue = banc.agent(base, controle, conf, tours=3, nominale=1, suspendu=5)
+    # La cadence, MESURÉE : trois tours (donc deux attentes) en
+    # IDENTITE_PERDUE doivent coûter la période nominale, jamais le ralenti
+    # de 24 h. C'est l'invariant 4, et c'est ce que N-1 a tranché.
+    #
+    # Le repli est neutralisé ici (`localhost` résout) : on mesure des
+    # attentes, et un échec de résolution ajouterait à chaque tour un délai
+    # qui n'a rien à voir avec la cadence.
+    NOMINALE, RALENTI, TOURS = 1, 8, 3
+    with open(os.path.join(controle, "repoll.txt"), "w") as f:
+        f.write("localhost 127.0.0.1\n")
+    _, duree_perdue = banc.agent(base, controle, conf, tours=TOURS,
+                                 nominale=NOMINALE, suspendu=RALENTI)
+    base2, controle2, conf2, _ = enroler("a10bis", resoluble=True)
     banc.admin("POST", "/kits/A0001/suspendre", {})
-    base2, controle2, conf2, _ = enroler("a10bis")
-    banc.admin("POST", "/kits/A0001/suspendre", {})
-    _, duree_suspendu = banc.agent(base2, controle2, conf2, tours=3, nominale=1, suspendu=5)
-    r.verifier(lire_json(os.path.join(controle2, "etat.json"))["etat"] == "suspendu",
+    # Un tour de TRANSITION d'abord : on chronomètre trois tours PASSÉS dans
+    # l'état, pas la bascule qui y mène — la cadence d'un tour est celle de
+    # l'état où il commence.
+    banc.agent(base2, controle2, conf2, tours=1)
+    _, duree_suspendu = banc.agent(base2, controle2, conf2, tours=TOURS,
+                                   nominale=NOMINALE, suspendu=RALENTI)
+    r.verifier(lire_json(os.path.join(controle2, "etat-agent.json"))["etat"] == "suspendu",
                "le témoin de comparaison est bien en SUSPENDU")
-    r.verifier(duree_perdue < duree_suspendu / 2,
+    # Écart ATTENDU entre les deux séries : (TOURS-1) attentes de différence.
+    attendu = (TOURS - 1) * (RALENTI - NOMINALE)
+    r.verifier(duree_suspendu - duree_perdue > 0.7 * attendu,
                "IDENTITE_PERDUE bat à la cadence nominale, pas au ralenti de 24 h",
-               "perdue=%.1fs suspendu=%.1fs" % (duree_perdue, duree_suspendu))
+               "perdue=%.1fs suspendu=%.1fs écart attendu≈%ds"
+               % (duree_perdue, duree_suspendu, attendu))
     r.fin("A-10 identité perdue")
 
     # =========================================================================
@@ -386,7 +409,7 @@ try:
     r.verifier(not emises,
                "deux battements, zéro requête : une requête sans porteur ne peut pas réussir",
                emises)
-    etat = lire_json(os.path.join(controle, "etat.json"))
+    etat = lire_json(os.path.join(controle, "etat-agent.json"))
     r.verifier(etat["etat"] == "identite_perdue",
                "l'état est signalé localement pour l'intervention sur place", etat)
     r.verifier("relecture au prochain battement" in acheve.stderr.decode(),
@@ -396,34 +419,59 @@ try:
     # =========================================================================
     r.cas("A-13 — repli sur l'IP : le nom est conservé, aucune empreinte épinglée",
           "annexe 2 §3.3 (arbitrage Q3) ; annexe 1 §5.2")
-    banc.reinitialiser()
-    base, controle, conf = banc.sable("a13")
-    banc.poser_usine(controle)                      # nom qui NE résout PAS
-    acheve, _ = banc.agent(base, controle, conf, tours=1)
-    traces = acheve.stderr.decode()
-    r.verifier(not os.path.exists(os.path.join(controle, "usine.json")),
-               "l'enrôlement aboutit malgré une résolution impossible")
-    r.verifier("repli sur 127.0.0.1, nom conservé" in traces,
-               "le repli est emprunté, et il garde le nom (SNI et chaîne inchangés)",
-               traces[-400:])
-    marque = banc.marque_trace()
-    acheve, _ = banc.agent(base, controle, conf, tours=1)
-    r.verifier("repli sur 127.0.0.1, nom conservé" in acheve.stderr.decode(),
-               "le re-poll emprunte le même chemin depuis repoll.txt (couples L4)")
-    r.verifier(banc.requetes_depuis(marque, "/config-kit"),
-               "et le serveur reçoit bien la requête")
-    # La voie normale : un nom qui résout n'emprunte aucun repli.
-    banc.reinitialiser()
-    base2, controle2, conf2 = banc.sable("a13bis")
-    banc.poser_usine(controle2, resoluble=True)
-    acheve, _ = banc.agent(base2, controle2, conf2, tours=1)
-    r.verifier("repli sur" not in acheve.stderr.decode(),
-               "un nom qui résout est joint directement — le repli est l'exception")
     source = lire(os.path.join(os.path.dirname(ICI), "..", "docker", "wg",
                                "agent-enrolement.sh"))
     r.verifier("empreinte_tls" not in source and "--pinnedpubkey" not in source,
                "l'agent d'enrôlement n'épingle rien, et ne lit pas empreinte_tls")
-    r.fin("A-13 repli sur l'IP")
+    r.verifier(" -k " not in source and "--insecure" not in source,
+               "et il ne désactive jamais la vérification")
+    port_tls = banc.demarrer_tls()
+    if not port_tls:
+        r.sauter("A-13 repli sur l'IP", "openssl absent — le volet TLS n'est pas rejouable")
+    else:
+        # Le repli, en TLS RÉEL. Le nom ne résout pas ; le certificat servi
+        # porte ce nom et rien d'autre — pas de SAN sur l'IP. Un agent
+        # d'enrôlement qui joindrait l'IP en réécrivant l'URL verrait donc
+        # la vérification échouer, et n'enrôlerait rien.
+        banc.reinitialiser()
+        base, controle, conf = banc.sable("a13")
+        banc.poser_usine(controle, tls=port_tls)
+        acheve, _ = banc.agent(base, controle, conf, tours=1,
+                               tls=port_tls, ca=banc.tls_ca)
+        traces = acheve.stderr.decode()
+        r.verifier(not os.path.exists(os.path.join(controle, "usine.json")),
+                   "l'enrôlement aboutit en HTTPS alors que le nom NE RÉSOUT PAS : "
+                   "l'IP est jointe, le nom est conservé (SNI et chaîne)", traces[-500:])
+        r.verifier("repli sur 127.0.0.1, nom conservé" in traces,
+                   "et c'est bien le repli qui a servi", traces[-500:])
+        marque = banc.marque_trace()
+        acheve, _ = banc.agent(base, controle, conf, tours=1,
+                               tls=port_tls, ca=banc.tls_ca)
+        r.verifier(banc.requetes_depuis(marque, "/config-kit"),
+                   "le re-poll emprunte le même chemin depuis repoll.txt (couples L4)")
+
+        # Le NÉGATIF, sans lequel tout ce qui précède passerait avec `-k` :
+        # la même requête, une ancre qui n'est pas celle du certificat.
+        banc.reinitialiser()
+        base2, controle2, conf2 = banc.sable("a13-ca-etrangere")
+        banc.poser_usine(controle2, tls=port_tls)
+        acheve, _ = banc.agent(base2, controle2, conf2, tours=1,
+                               tls=port_tls, ca=banc.tls_ca_etrangere)
+        r.verifier(os.path.exists(os.path.join(controle2, "usine.json")),
+                   "avec une CA étrangère, l'enrôlement ÉCHOUE — la vérification "
+                   "de chaîne est réelle, ce n'est pas un tunnel en clair déguisé",
+                   acheve.stderr.decode()[-300:])
+        r.verifier(not os.path.exists(os.path.join(controle2, "secret_api")),
+                   "et rien n'a été écrit")
+
+        # La voie normale : un nom qui résout n'emprunte aucun repli.
+        banc.reinitialiser()
+        base3, controle3, conf3 = banc.sable("a13-direct")
+        banc.poser_usine(controle3, resoluble=True)
+        acheve, _ = banc.agent(base3, controle3, conf3, tours=1)
+        r.verifier("repli sur" not in acheve.stderr.decode(),
+                   "un nom qui résout est joint directement — le repli est l'exception")
+        r.fin("A-13 repli sur l'IP")
 
     # =========================================================================
     r.cas("A-14 — rotation de la clé de passerelles : syncconf, jamais down/up",
@@ -461,12 +509,18 @@ try:
                                "appels": 1, "duree_s": 8}),
             ("ecoute_fermee", {"mode": "ecoute_fermee", "duree_s": 3})):
         banc.pilotage("POST", "/_mock/coupure", corps)
+        if mode_coupure == "ecoute_fermee":
+            # La fermeture est différée (le mock laisse partir sa réponse de
+            # pilotage) : sans cette attente, l'agent d'enrôlement tournerait
+            # AVANT la coupure — un cas vert qui n'aurait rien coupé.
+            r.verifier(banc.attendre_mock_ferme(),
+                       "ecoute_fermee : les écoutes sont effectivement fermées")
         acheve, _ = banc.agent(base, controle, conf, tours=1)
         apres = empreintes(controle)
         touches = [n for n in reference
-                   if n != "etat.json" and reference.get(n) != apres.get(n)]
+                   if n != "etat-agent.json" and reference.get(n) != apres.get(n)]
         r.verifier(not touches, "%s : aucun fichier d'état modifié" % mode_coupure, touches)
-        etat = lire_json(os.path.join(controle, "etat.json"))
+        etat = lire_json(os.path.join(controle, "etat-agent.json"))
         r.verifier(etat["etat"] == "enrole",
                    "%s : l'état est conservé, ce n'est ni une suspension ni une perte d'identité"
                    % mode_coupure, etat)
@@ -474,7 +528,7 @@ try:
             r.verifier(banc.attendre_mock(), "ecoute_fermee : les écoutes se rouvrent seules")
         banc.pilotage("POST", "/_mock/coupure/effacer", {})
     banc.agent(base, controle, conf, tours=1)
-    r.verifier(lire_json(os.path.join(controle, "etat.json"))["code_config_kit"] in ("200", "304"),
+    r.verifier(lire_json(os.path.join(controle, "etat-agent.json"))["code_config_kit"] in ("200", "304"),
                "les coupures levées, le re-poll repart tout seul")
     r.fin("A-15 coupures")
 
@@ -491,6 +545,42 @@ try:
     r.verifier("AGENT_TOURS:-0" in source,
                "sans borne d'exécution, l'agent d'enrôlement tourne SANS FIN — le régime du kit")
     r.fin("A-16 cadences et invariant 6")
+
+    # =========================================================================
+    r.cas("A-17 — l'ordre des écritures : usine.json ne part qu'en DERNIER",
+          "annexe 2 §3.3 et invariant 2 (arbitrage Q2)")
+    # Le point de non-retour ne se vérifie pas sur l'état final — il se
+    # vérifie en COUPANT la séquence. La doublure `mv` fait échouer la
+    # publication d'un fichier désigné : `usine.json` doit alors survivre,
+    # quel que soit l'endroit de la coupure.
+    for interrompu, encore_absent in (("secret_api", "wg0.conf"),
+                                      ("endpoints.version", None)):
+        banc.reinitialiser()
+        base, controle, conf = banc.sable("a17-" + interrompu)
+        banc.poser_usine(controle)
+        acheve, _ = banc.agent(base, controle, conf, tours=1, mv_echoue=interrompu)
+        r.verifier(os.path.exists(os.path.join(controle, "usine.json")),
+                   "écriture de %s interrompue : usine.json est CONSERVÉ" % interrompu,
+                   acheve.stderr.decode()[-300:])
+        if encore_absent:
+            r.verifier(not os.path.exists(os.path.join(conf, encore_absent)),
+                       "et la séquence s'est arrêtée là (%s pas écrit)" % encore_absent)
+        # La coupure levée, le rejeu aboutit : la reprise est idempotente.
+        acheve, _ = banc.agent(base, controle, conf, tours=1)
+        r.verifier(not os.path.exists(os.path.join(controle, "usine.json")),
+                   "au tour suivant, l'enrôlement aboutit et usine.json part")
+
+    # L'ordre INTERNE de la séquence, par les dates de publication.
+    ordre = ["secret_api", "endpoints.txt", "port", "repoll.txt",
+             "applicatif.json", "domaines.json", "endpoints.version"]
+    dates = [(n, os.stat(os.path.join(controle, n)).st_mtime_ns) for n in ordre]
+    desordre = [dates[i][0] for i in range(1, len(dates))
+                if dates[i][1] < dates[i - 1][1]]
+    r.verifier(not desordre,
+               "les fichiers sont publiés dans l'ordre normatif du §3.3", desordre)
+    r.verifier(os.stat(os.path.join(conf, "wg0.conf")).st_mtime_ns >= dates[0][1],
+               "wg0.conf est écrite après secret_api")
+    r.fin("A-17 ordre des écritures")
 
 finally:
     banc.arreter()
