@@ -23,8 +23,11 @@ esac
 
 # Piège 9 : en backend legacy, les règles netfilter seraient posées dans une
 # table que PERSONNE ne lit — muettes, et tous les tests faussement verts.
-if iptables --version 2>/dev/null | grep -qv nf_tables; then
-  echo "wg: backend netfilter « $(iptables --version) » — nf_tables exigé (piège 9)" >&2
+# Formulation FAIL-SAFE : on exige la PRÉSENCE de « nf_tables », on ne refuse
+# pas seulement « legacy » — une sortie vide (iptables muet) doit échouer,
+# pas passer.
+if ! iptables --version 2>/dev/null | grep -q nf_tables; then
+  echo "wg: backend netfilter « $(iptables --version 2>&1) » — nf_tables exigé (piège 9)" >&2
   exit 1
 fi
 

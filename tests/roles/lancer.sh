@@ -142,7 +142,7 @@ else
 fi
 
 # =============================================================================
-cas "R-05 — rôle kit : wg0 monte, MTU 1360, AUCUNE route par défaut (piège 11)"
+cas "R-05 — rôle kit : wg0 monte une conf Table=off, MTU 1360, sans route par défaut (piège 11)"
 mkdir -p "$BAC/kit"
 kit_sk=$(genkey); gw_sk=$(genkey); gw_pk=$(pubkey "$gw_sk")
 cat > "$BAC/kit/wg0.conf" <<CONF

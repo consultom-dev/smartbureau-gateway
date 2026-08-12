@@ -21,9 +21,17 @@ monter() { # $1 nom d'interface — la conf DOIT exister
   # tunnel (annexe 2 §3.5, même exigence pour la rotation).
   if ip link show "$1" >/dev/null 2>&1; then
     echo "wg($WG_ROLE): $1 déjà montée — resynchronisation de la conf" >&2
-    strip="/tmp/$1.strip.conf"                # POSIX sh : pas de <(…)
-    wg-quick strip "$WG_CONF/$1.conf" > "$strip"
-    wg syncconf "$1" "$strip"
+    # `wg-quick strip` CONSERVE la PrivateKey : le fichier temporaire porte
+    # la clé du kit (celle qui ne quitte jamais le kit, annexe 2 §3.2). Il
+    # naît donc en 600 (mktemp) et est effacé QUOI QU'IL ARRIVE — même si
+    # `wg syncconf` échoue et que set -e nous fait sortir. POSIX sh n'a pas
+    # de <(…), d'où le fichier ; il n'a pas de trap RETURN, d'où le nettoyage
+    # explicite avant chaque sortie.
+    strip="$(mktemp)"
+    wg-quick strip "$WG_CONF/$1.conf" > "$strip" \
+      || { rm -f "$strip"; return 1; }
+    wg syncconf "$1" "$strip" \
+      || { rm -f "$strip"; return 1; }
     rm -f "$strip"
   else
     wg-quick up "$WG_CONF/$1.conf"
@@ -43,6 +51,10 @@ tenir() { # $* interfaces à surveiller — mort bruyante si l'une disparaît
     for iface in "$@"; do
       ip link show "$iface" >/dev/null 2>&1 || {
         echo "wg($WG_ROLE): $iface a disparu — arrêt (le compose relance)" >&2
+        # Redescendre les interfaces SURVIVANTES avant de sortir : la
+        # promesse « pas d'interface orpheline en netns hôte » vaut aussi
+        # sur le chemin de crash, pas seulement sur l'arrêt par signal.
+        descendre "$@"
         return 1
       }
     done
