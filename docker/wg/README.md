@@ -48,9 +48,10 @@ santé (§3.3).
 ## Rôle `kit` (lot 2)
 
 Configuration WireGuard (`0.0.0.0/0` **avec** `Table = off`, MTU 1360,
-keepalive 25), **watchdog** (ping de `10.100.0.1` toutes les 30 s,
-rotation dans `endpoints.txt` — tranche 3) et **agent d'enrôlement**
-(`agent-enrolement.sh`, tranche 2).
+keepalive 25) et **trois processus** dans le même conteneur, à trois
+cadences qui ne s'attendent pas : l'**agent d'enrôlement**
+(`agent-enrolement.sh`), le **watchdog** (`watchdog.sh`, 30 s) et la
+**boucle de marqueurs** (`marqueurs.sh`, 60 s).
 
 L'agent d'enrôlement porte la machine à états de l'annexe 2 §3.3 —
 `USINE` → `NOMINAL`, `SUSPENDU` et sa reprise, `IDENTITE_PERDUE` et ses
@@ -67,8 +68,22 @@ champs de l'autre. Il lit le fichier d'usine dans `controle/usine.json`, où
 `premier-demarrage` l'a déplacé depuis `/boot` (arbitrage Q2) : aucun
 conteneur ne monte la partition d'amorçage.
 
-C'est le seul script du dépôt **sans `set -e`**, et c'est délibéré : son
-métier est de survivre aux coupures 4G, pas de mourir dessus.
+Le **watchdog** ping `10.100.0.1` — le serveur, donc le chemin complet :
+une passerelle peut répondre en WireGuard et ne plus router. En échec, il
+commute sur l'endpoint suivant d'`endpoints.txt`, en **relisant le port**
+(51830 pendant une rotation, arbitrage N4) et en lisant la clé du peer
+**sur l'interface** (`wg show`, arbitrage Q7) : deux fichiers, aucun
+processus, donc la bascule fonctionne **agent d'enrôlement mort**
+(invariant 5).
+
+La **boucle de marqueurs** publie `etat.json` pour `sante` : elle recopie
+l'état de l'agent d'enrôlement et lit `wg show`. Elle n'invente rien —
+`etat-agent.json` absent se lit `usine`, illisible se lit `inconnu`.
+
+Ces trois-là sont les seuls scripts du dépôt **sans `set -e`**, et c'est
+délibéré : leur métier est de survivre à ce qui tombe, pas de mourir
+dessus. Un watchdog qui sort sur un code de retour est un kit sans
+bascule, en silence.
 
 ## Rôle `serveur` (lot 2)
 
@@ -96,5 +111,6 @@ NAT** — le serveur est une feuille.
 Recette : `tests/roles/` (R-01 … R-06, tranche 1 — les trois rôles
 montent ; **sudo et module noyau `wireguard`**),
 `tests/agent-enrolement/` (A-01 … A-17, tranche 2 — la machine à états
-contre le mock ; **ni Docker ni module noyau**) et `tests/netfilter/`
-(P-01 … P-20, lot 4).
+contre le mock ; **ni Docker ni module noyau**), `tests/watchdog/`
+(W-01 … W-12, tranche 3 — **ni root, ni Docker, ni réseau**) et
+`tests/netfilter/` (P-01 … P-20, lot 4).

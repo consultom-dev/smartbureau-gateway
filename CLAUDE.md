@@ -84,8 +84,12 @@ sudo ./tests/roles/lancer.sh              # R-01 … R-06
 sudo SMARTBUREAU_SERVER=/chemin/vers/smartbureau-server \
      ./tests/agent-enrolement/lancer.py   # A-01 … A-17
 
+# Tranche 3 — la bascule d'endpoint et les marqueurs
+# Ni root, ni Docker, ni réseau : sh, jq, awk
+./tests/watchdog/lancer.py                # W-01 … W-12 (~35 s)
+
 # Le lint partagé (il vit dans smartbureau-server)
 SMARTBUREAU_SERVER=… /chemin/vers/smartbureau-server/outillage/lint/lint.sh
 
-# À compléter : tests/netfilter (lot 4), watchdog (tranche 3)
+# À compléter : tests/netfilter et tests/agent-passerelle (lot 4)
 ```
