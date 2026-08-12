@@ -2,7 +2,7 @@
 # =============================================================================
 # Le banc de l'agent d'enrôlement — tout ce qui n'est pas un cas de test.
 #
-# Il monte trois choses et les démonte proprement :
+# Il monte quatre choses et les démonte proprement :
 #
 #   1. LE MOCK du plan de contrôle (`smartbureau-server/contrats/mock/`),
 #      sur sa **surface proxy** : `POST /enroler` et `GET /config-kit`, et
@@ -41,8 +41,10 @@
 #      passe par `wg syncconf` et jamais par un `wg-quick down`.
 #
 # Aucune dépendance : bibliothèque standard, `curl`, `jq`, `sh`. Ni Docker
-# ni privilège réseau — c'est ce qui rend la tranche 2 recettable là où
-# `tests/roles/` se déclare sauté.
+# ni module noyau — c'est ce qui rend la tranche 2 recettable là où
+# `tests/roles/` se déclare sauté. (Le résolveur du banc souhaite le port
+# 53 sur la boucle locale — root, que les cas exigent déjà — et se dégrade
+# proprement sans lui : comportement d'avant, exact mais flottant.)
 # =============================================================================
 
 import json
