@@ -29,7 +29,9 @@ WG_CORE_INTERVALLE="${WG_CORE_INTERVALLE:-10}"
 # Défense en profondeur : rien de non vérifié ne descend vers `wg set`, même
 # si wg-core-ctl a déjà validé (la leçon de l'injection dans /metrics).
 _cle_ok() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9+/]{43}=$'; }
-_ip_ok()  { printf '%s' "$1" | grep -Eq '^10\.100\.0\.[0-9]{1,3}/32$'; }
+# Dernier octet 0-255 (pas 0-999) : le filet reste correct, même derrière le
+# validateur strict de wg-core-ctl (suggestion de relecture Q20).
+_ip_ok()  { printf '%s' "$1" | grep -Eq '^10\.100\.0\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])/32$'; }
 
 # Les clés publiques des [Peer] STATIQUES, lues du conf provisionné (source
 # de vérité). Tolère `PublicKey = X` comme `PublicKey=X`.
