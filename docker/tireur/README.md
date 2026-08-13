@@ -39,3 +39,24 @@ toutes les heures : comparer la version du coffre à la version locale
   identité Vault, puis tirage, puis démarrage du service TLS. Tant que le
   certificat n'est pas là, la machine ne sert rien — **c'est une étape de
   provisionnement, pas une panne**.
+
+## Ce qui est ici
+
+- `tireur.sh` — le tireur : AppRole (role_id en config, secret_id ENCAPSULÉ
+  déballé une fois puis mis en cache), boucle qui compare la version du coffre
+  à la locale et, si elle diffère, **écrit cert + clé atomiquement** (640
+  root:smartbureau-lecture) puis **recharge** Traefik. **Panne inerte** :
+  Vault scellé/injoignable ⇒ le certificat reste, on réessaie.
+- `provisionner-approle.sh <machine>` — côté serveur (VAULT_TOKEN d'admin) :
+  active AppRole, écrit la **policy au plus étroit** (dérivée de
+  `policy.hcl.modele` : lecture SEULE sur `kv/tls/<machine>`), crée le rôle,
+  rend `role_id` + un `secret_id` **encapsulé** (remis une fois).
+- `Dockerfile` — image partagée (base = CLI Vault épinglé, groupe GID 3000).
+
+## Recette
+
+`tests/tireur/lancer.py` (TIR-01…06, 11 assertions) : vrai Vault + le vrai
+conteneur `tireur`. Tirage, **640 root:smartbureau-lecture (GID 3000)**,
+rechargement, **rotation** (nouvelle version → réécriture), **panne inerte**
+(Vault scellé → certificat conservé, sortie propre) et **isolation** (la
+policy d'une passerelle ne lit pas `kv/tls/factory`).

@@ -1,0 +1,10 @@
+# Policy du tireur de @MACHINE@ (annexe 5 §5.3) — lecture SEULE sur son
+# UNIQUE chemin. Une passerelle ne peut pas lire kv/tls/factory, et
+# réciproquement : un secret par machine, un chemin par machine. KV v2 :
+# la donnée sous /data/, la version sous /metadata/.
+path "kv/data/tls/@MACHINE@" {
+  capabilities = ["read"]
+}
+path "kv/metadata/tls/@MACHINE@" {
+  capabilities = ["read"]
+}
