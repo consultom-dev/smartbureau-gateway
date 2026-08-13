@@ -7,7 +7,7 @@ Cinq images vivent ici (annexe 7 §1) :
 | `wg/` | **l'image unique des trois rôles** | 2 (image), 4 (règles passerelle) | annexe 3 §3 ; arch. §6.2 ; annexe 2 §3 |
 | `wg-agent/` | l'agent de passerelle | 4 | annexe 3 §4 |
 | `proxy-enrolement/` | le proxy d'enrôlement | 4 | annexe 3 §5 |
-| `tireur/` | Vault Agent, partagé avec la VM usine | 5a | annexe 5 §5.3 |
+| `tireur/` | le tireur de certificats (AppRole, CLI Vault), partagé avec la VM usine | 5a | annexe 5 §5.3 |
 | `wg-core-ctl/` | la surface de contrôle du peer wg-core (rôle serveur) | 2 étendu | annexe 1 §6.4 ; arbitrages Q17, Q20 |
 
 ## Deux conteneurs, deux plans
