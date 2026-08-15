@@ -19,7 +19,7 @@ TLS="${TLS_DIR:-/etc/proxy/tls}"
 MODELES="${MODELES_DIR:-/etc/nginx}"
 RENDUS="${RENDUS_DIR:-/etc/nginx}"
 
-for f in "$TLS/gateway.crt" "$TLS/gateway.key"; do
+for f in "$TLS/cert.pem" "$TLS/key.pem"; do
   [ -r "$f" ] || { echo "proxy-enrolement: $f absent — le wildcard *.gateway se tire de Vault (annexe 3 §2.4)" >&2; exit 1; }
 done
 
