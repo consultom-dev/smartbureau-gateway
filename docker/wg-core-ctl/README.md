@@ -39,9 +39,9 @@ le réseau interne du compose (comme `db`, `keycloak`, `/metrics`).
 { "peers": [ { "gw_id": "gw-01", "cle_publique": "…=", "allowed_ips": "10.100.0.2/32" } ] }
 ```
 
-`wg-core` (rôle serveur, `serveur-peers.sh`) réconcilie ce fichier sur `wg0`
-en diffant l'état **réel** (`wg show`) — idempotent, comme l'agent de
-passerelle (annexe 3 §4.1). Les peers **statiques** du `wg0.conf`
+`wg-core` (rôle serveur, `serveur-peers.sh`) réconcilie ce fichier sur
+`wg0` en diffant l'état **réel** (`wg show`) — idempotent, comme
+l'agent de passerelle (annexe 3 §4.1). Les peers **statiques** du `wg0.conf`
 provisionné (la VM d'usine) sont lus depuis ce conf et **jamais touchés** :
 seul le delta dynamique est réconcilié. Un `wg-core` redémarré retrouve ses
 peers de passerelle depuis le fichier, sans intervention.
