@@ -524,8 +524,8 @@ class Banc:
             # Repli de CI, sur opt-in EXPLICITE : dans le conteneur de tâche,
             # CLONE_NEWNS est refusé (seccomp, capacités), mais /etc/resolv.conf
             # n'appartient qu'au conteneur jetable — écriture directe,
-            # restaurée aussitôt l'agent rendu. Jamais par défaut : sur un
-            # poste, l'hôte ne se touche pas.
+            # restaurée aussitôt l'agent d'enrôlement rendu. Jamais par
+            # défaut : sur un poste, l'hôte ne se touche pas.
             with open("/etc/resolv.conf") as f:
                 resolv_a_restaurer = f.read()
             shutil.copyfile(self.resolv_conf, "/etc/resolv.conf")
