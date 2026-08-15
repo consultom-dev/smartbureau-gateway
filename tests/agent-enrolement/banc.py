@@ -510,7 +510,8 @@ class Banc:
         if ca:
             environnement["CURL_CA_BUNDLE"] = ca
         commande = ["sh", AGENT]
-        if self.resolv_conf and shutil.which("unshare"):
+        resolv_a_restaurer = None
+        if self.resolv_conf and self._unshare_mount_utilisable():
             # Mount-namespace privé (propagation coupée par défaut) : le
             # resolv.conf du banc n'est visible que de l'agent d'enrôlement,
             # l'hôte n'est jamais touché. `mount` suit le lien symbolique
@@ -519,10 +520,41 @@ class Banc:
                         'mount --bind "$BANC_RESOLV" /etc/resolv.conf && exec sh "$0"',
                         AGENT]
             environnement["BANC_RESOLV"] = self.resolv_conf
+        elif self.resolv_conf and os.environ.get("BANC_RESOLV_DIRECT") == "1":
+            # Repli de CI, sur opt-in EXPLICITE : dans le conteneur de tâche,
+            # CLONE_NEWNS est refusé (seccomp, capacités), mais /etc/resolv.conf
+            # n'appartient qu'au conteneur jetable — écriture directe,
+            # restaurée aussitôt l'agent rendu. Jamais par défaut : sur un
+            # poste, l'hôte ne se touche pas.
+            with open("/etc/resolv.conf") as f:
+                resolv_a_restaurer = f.read()
+            shutil.copyfile(self.resolv_conf, "/etc/resolv.conf")
         debut = time.time()
-        acheve = subprocess.run(commande, env=environnement, timeout=timeout,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            acheve = subprocess.run(commande, env=environnement, timeout=timeout,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        finally:
+            if resolv_a_restaurer is not None:
+                with open("/etc/resolv.conf", "w") as f:
+                    f.write(resolv_a_restaurer)
         return acheve, time.time() - debut
+
+    _unshare_mount = None
+
+    @classmethod
+    def _unshare_mount_utilisable(cls):
+        """La présence d'`unshare` ne prouve rien : dans un conteneur, le
+        noyau refuse CLONE_NEWNS à l'exécution (constaté sur l'exécuteur de
+        CI). Sonder une fois, pas supposer."""
+        if cls._unshare_mount is None:
+            try:
+                cls._unshare_mount = bool(shutil.which("unshare")) and \
+                    subprocess.run(["unshare", "--mount", "true"],
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL).returncode == 0
+            except OSError:
+                cls._unshare_mount = False
+        return cls._unshare_mount
 
     @staticmethod
     def appels_wg(base):

@@ -48,6 +48,11 @@ test:sonde:
 
 test:agent-enrolement:
   extends: .test
+  variables:
+    # Le conteneur de tâche refuse CLONE_NEWNS : le banc écrit son
+    # resolv.conf directement (conteneur jetable) et le restaure — opt-in
+    # explicite, jamais un défaut (voir banc.py).
+    BANC_RESOLV_DIRECT: "1"
   before_script:
     - !reference [.test, before_script]
     - !reference [.contrat-par-miroir, before_script]
