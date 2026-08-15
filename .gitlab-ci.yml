@@ -86,6 +86,7 @@ test:wg-core-applier:
 
 test:tireur:
   extends: .test
+  resource_group: banc-docker
   script:
     - ./tests/tireur/lancer.py
 
