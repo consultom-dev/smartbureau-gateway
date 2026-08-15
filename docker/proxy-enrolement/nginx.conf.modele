@@ -56,8 +56,8 @@ http {
     # N passerelles — même régime que la clé WireGuard partagée. Il se
     # re-tire à chaque renouvellement : l'oublier ferme l'enrôlement ET le
     # re-poll de toute la flotte servie (invariant 10).
-    ssl_certificate     /etc/proxy/tls/gateway.crt;
-    ssl_certificate_key /etc/proxy/tls/gateway.key;
+    ssl_certificate     /etc/proxy/tls/cert.pem;
+    ssl_certificate_key /etc/proxy/tls/key.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_session_cache   shared:SSL:4m;
 
