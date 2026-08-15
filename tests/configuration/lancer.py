@@ -185,7 +185,7 @@ try:
     # =========================================================================
     r.cas("C-06 — sans son wildcard, le proxy refuse de démarrer",
           "annexe 3 §8 invariant 10")
-    r.verifier("gateway.crt" in ENTREE_PROXY and "gateway.key" in ENTREE_PROXY,
+    r.verifier("cert.pem" in ENTREE_PROXY and "key.pem" in ENTREE_PROXY,
                "l'entrypoint vérifie les deux fichiers")
     # « un `exit 1` quelque part » ne prouve rien : il faut que le REFUS
     # soit attaché au CONTRÔLE des deux fichiers. On EXÉCUTE donc
@@ -199,7 +199,7 @@ try:
         tls = os.path.join(bac, "tls")
         os.makedirs(tls)
         if certificats:
-            for f in ("gateway.crt", "gateway.key"):
+            for f in ("cert.pem", "key.pem"):
                 with open(os.path.join(tls, f), "w") as sortie:
                     sortie.write("-----BEGIN CERTIFICATE----- (factice)\n")
         source = os.path.join(RACINE, "docker", "proxy-enrolement")
