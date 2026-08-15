@@ -1,0 +1,121 @@
+# =============================================================================
+# Pipeline du rôle passerelle (annexe 9 §4 ; gabarit : smartbureau-factory)
+#
+# Un dépôt = une architecture = une étiquette : amd64 — À L'EXCEPTION de
+# l'image `wg`, la seule multi-arch du système (annexe 9 §4.2) : deux
+# constructions natives, puis l'assemblage du manifeste. Jamais de buildx
+# émulé (invariant 5).
+#
+# Les suites qui exigent un privilège absent (module noyau wireguard,
+# CAP_NET_ADMIN) se déclarent SAUTÉES elles-mêmes — c'est leur contrat.
+# =============================================================================
+
+include:
+  - project: smartbureau/smartbureau-factory
+    ref: main
+    file: pipelines/commun.yml
+
+default:
+  tags: [amd64]
+
+lint:
+  extends: .lint
+
+# Le contrat épinglé (contrats.epingle) pointe la forge de travail ; en CI
+# le clone vient du MIROIR local — même condensat, épingle inchangée, et
+# la CI n'a aucun identifiant GitHub.
+.contrat-par-miroir:
+  before_script:
+    - >-
+      git config --global
+      url."https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/smartbureau/smartbureau-server.git".insteadOf
+      "https://github.com/consultom-dev/smartbureau-server.git"
+
+test:watchdog:
+  extends: .test
+  script:
+    - ./tests/watchdog/lancer.py            # W-01 … W-12
+
+test:configuration:
+  extends: .test
+  script:
+    - ./tests/configuration/lancer.py       # C-01 … C-08
+
+test:sonde:
+  extends: .test
+  script:
+    - ./tests/sonde/lancer.py               # S-01 … S-06
+
+test:agent-enrolement:
+  extends: .test
+  before_script:
+    - !reference [.test, before_script]
+    - !reference [.contrat-par-miroir, before_script]
+  script:
+    - ./tests/agent-enrolement/lancer.py    # A-01 … A-17, contre le mock
+
+test:agent-passerelle:
+  extends: .test
+  script:
+    - ./tests/agent-passerelle/lancer.py    # G-01 … G-11
+
+test:netfilter:
+  extends: .test
+  script:
+    - ./tests/netfilter/lancer.sh           # P-01 … P-08
+
+test:roles:
+  extends: .test
+  script:
+    - ./tests/roles/lancer.sh               # R-01 … R-06 — SAUTÉS sans module noyau
+
+test:wg-core-ctl:
+  extends: .test
+  script:
+    - ./tests/wg-core-ctl/lancer.py
+
+test:wg-core-applier:
+  extends: .test
+  script:
+    - ./tests/wg-core-applier/lancer.sh
+
+test:tireur:
+  extends: .test
+  script:
+    - ./tests/tireur/lancer.py
+
+# --- build : les images amd64 du rôle -----------------------------------------
+construire:
+  extends: .image
+  variables:
+    ARCHI: amd64
+  parallel:
+    matrix:
+      - IMAGE: [wg-agent, proxy-enrolement, wg-core-ctl, tireur]
+
+# --- build : l'image wg, la seule multi-arch (annexe 9 §4.2) ------------------
+construire:wg:amd64:
+  extends: .image
+  variables:
+    IMAGE: wg
+    ARCHI: amd64
+
+construire:wg:arm64:
+  extends: .image
+  tags: [arm64]
+  variables:
+    IMAGE: wg
+    ARCHI: arm64
+
+# --- publish : une référence finale par image ---------------------------------
+manifeste:
+  extends: .manifeste
+  variables:
+    IMAGES: "wg-agent proxy-enrolement wg-core-ctl tireur"
+    SOURCES: "amd64"
+
+manifeste:wg:
+  extends: .manifeste
+  variables:
+    IMAGES: "wg"
+    SOURCES: "amd64 arm64"
