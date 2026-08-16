@@ -116,6 +116,19 @@ regles() {
     printf '%s\n' "filter FORWARD -i $_pub -o $IFACE_KITS -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
   done
 
+  # 5 bis. Clamp MSS sur tout TCP RELAYÉ à travers un tunnel (annexe 3
+  #    §3.2, piège n°3 de l'arch.) : les extrémités négocient leur MSS sans
+  #    connaître la MTU des tunnels intermédiaires — sans clamp, le
+  #    datagramme WireGuard fragmente et des transitaires jettent les
+  #    fragments ; la poignée TLS meurt en silence. Constaté en vraie
+  #    grandeur sur gw-02 (16/08/2026) : l'hôte passait (MSS borné par sa
+  #    propre MTU wg-core), le conteneur du proxy jamais (MSS 1460 du
+  #    bridge) — « upstream timed out while SSL handshaking ».
+  printf '%s\n' "mangle FORWARD -o $IFACE_CORE -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+  printf '%s\n' "mangle FORWARD -i $IFACE_CORE -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+  printf '%s\n' "mangle FORWARD -o $IFACE_KITS -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+  printf '%s\n' "mangle FORWARD -i $IFACE_KITS -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+
   # 6. Le fourre-tout, EN DERNIER, et EXPLICITE (arbitrage Q9).
   printf '%s\n' "filter FORWARD -i $IFACE_KITS -j REJECT --reject-with icmp-admin-prohibited"
 
