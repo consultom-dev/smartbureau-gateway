@@ -230,6 +230,37 @@ try:
     r.fin("A-05 403 d'enrôlement")
 
     # =========================================================================
+    r.cas("A-18 — 500 sur /enroler : « réponse inattendue », JAMAIS « injoignable »",
+          "annexe 2 §3.3 — le premier enrôlement réel (A0003, 17/08/2026) a payé "
+          "ce diagnostic : le serveur répondait 500, l'agent concluait « aucune URL "
+          "joignable », et l'exploitant cherchait un problème de réseau inexistant")
+    banc.reinitialiser()
+    base, controle, conf = banc.sable("a18")
+    banc.poser_usine(controle)
+    banc.pilotage("POST", "/_mock/coupure",
+                  {"mode": "erreur_500", "routes": ["/enroler"], "appels": 2})
+    marque = banc.marque_trace()
+    banc.agent(base, controle, conf, tours=1)
+    tentatives = banc.requetes_depuis(marque, "/enroler")
+    r.verifier(len(tentatives) >= 1, "le tour a bien tenté l'enrôlement", tentatives)
+    etat = lire_json(os.path.join(controle, "etat-agent.json"))
+    r.verifier(etat["code_config_kit"] == "500",
+               "le CODE reçu est journalisé, pas avalé par un `*) : ;`", etat)
+    r.verifier("inattendue" in etat.get("detail", "").lower()
+               and "joignable" in etat.get("detail", "").lower(),
+               "le détail dit « réponse inattendue » ET que le nœud est joignable", etat)
+    r.verifier("aucune URL" not in etat.get("detail", ""),
+               "il ne dit SURTOUT PAS « aucune URL joignable » — c'est faux et ça "
+               "envoie chercher au mauvais endroit", etat)
+    r.verifier(os.path.exists(os.path.join(controle, "usine.json")),
+               "usine.json conservé : rien n'a été consommé")
+    banc.pilotage("POST", "/_mock/coupure/effacer", {})
+    banc.agent(base, controle, conf, tours=1)
+    r.verifier(not os.path.exists(os.path.join(controle, "usine.json")),
+               "le 500 levé, le tour suivant enrôle — la boucle ne s'est pas arrêtée")
+    r.fin("A-18 réponse inattendue")
+
+    # =========================================================================
     r.cas("A-06 — NOMINAL, 200 : les blocs pki/tls/registre, et le témoin EN DERNIER",
           "annexe 2 §3.2 et §3.3 ; invariants 3, 11 ; annexe 1 §4.4")
     base, controle, conf, _ = enroler("a06")

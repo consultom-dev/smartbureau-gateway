@@ -290,11 +290,13 @@ tour_usine() {
   # celle du couple `repli` qui porte le même hôte. Le `while` tourne dans
   # un sous-shell (il est en bout de tube) : le verdict passe par des
   # marqueurs, pas par des variables.
-  rm -f "$BAC/enrole" "$BAC/refus"
+  rm -f "$BAC/enrole" "$BAC/refus" "$BAC/repondu" "$BAC/code-inattendu"
   jq -r '.enrolement[]?' "$USINE" | while read -r url; do
     _hote="$(hote_de_url "$url")"
     _ip="$(jq -r --arg h "$_hote" '.repli[]? | select(.hote == $h) | .ip' "$USINE" | head -1)"
-    appeler "$url" "$_ip" -X POST -H 'Content-Type: application/json' -d "@$CORPS"
+    if appeler "$url" "$_ip" -X POST -H 'Content-Type: application/json' -d "@$CORPS"; then
+      : > "$BAC/repondu"          # le serveur a RÉPONDU — quel que soit le code
+    fi
     case "$CODE" in
       200) : > "$BAC/enrole"; break ;;
       403)
@@ -303,13 +305,28 @@ tour_usine() {
         # d'essayer — le journal du serveur, lui, voit la rafale.
         journal "403 sur $url — fichier d'usine annulé ou volé ; on continue d'essayer"
         : > "$BAC/refus" ;;
-      *) : ;;
+      *)
+        # TOUT autre code se journalise, avec son CORPS tronqué. Le `: ;`
+        # silencieux d'avant a coûté des heures au premier enrôlement réel
+        # (kit A0003, 17/08/2026) : le serveur répondait 500, l'agent
+        # concluait « aucune URL joignable », et le diagnostic envoyait
+        # chercher un problème de réseau qui n'existait pas. Un code
+        # inattendu n'est pas un silence : c'est une information.
+        printf '%s\n' "${CODE:-000}" > "$BAC/code-inattendu"
+        journal "réponse inattendue de $url : HTTP ${CODE:-000} — $(tr -d '\n' < "$REPONSE" 2>/dev/null | cut -c1-200)" ;;
     esac
   done
 
   if [ ! -f "$BAC/enrole" ]; then
+    # TROIS états distincts, et non deux (annexe 2 §3.3) : un serveur qui
+    # répond mal n'est pas un serveur inatteignable, et les confondre fait
+    # chercher au mauvais endroit — c'est ce qui est arrivé au premier
+    # enrôlement réel (A0003, 17/08/2026).
     if [ -f "$BAC/refus" ]; then
       etat_ecrire usine 403 "enrôlement refusé — fichier d'usine annulé ou volé"
+    elif [ -f "$BAC/repondu" ]; then
+      _code="$(cat "$BAC/code-inattendu" 2>/dev/null || printf '000\n')"
+      etat_ecrire usine "$_code" "réponse inattendue du plan de contrôle (HTTP $_code) — le nœud est joignable"
     else
       etat_ecrire usine "-" "aucune URL d'enrôlement joignable"
     fi
