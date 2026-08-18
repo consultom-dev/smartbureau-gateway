@@ -2,7 +2,7 @@
 # =============================================================================
 # Le WATCHDOG du kit — bascule d'endpoint (annexe 2 §3.4 ; arch. §6.2, §7).
 #
-# Toutes les 30 s : `ping -c3 -W2 -w10 10.100.0.1` (le `-w` borne le test
+# Toutes les 30 s : `ping -I wg0 -c3 -W2 -w10 10.100.0.1` (le `-w` borne le test
 # quoi que fasse la variante d'iputils : 30 + 10 < 60, le critère de fini
 # tient par construction). En échec, il commute le peer
 # de wg0 sur l'endpoint suivant d'`endpoints.txt`. C'est tout, et c'est
@@ -144,7 +144,22 @@ while :; do
     # d'abord que l'agent d'enrôlement obtienne une identité. Ce n'est pas
     # une panne, et il n'y a rien à faire basculer.
     journal "$IFACE absente — rien à surveiller pour l'instant"
-  elif ping -c3 -W2 -w10 "$CIBLE" >/dev/null 2>&1; then
+  # `-I "$IFACE"` : la sonde doit sortir PAR LE TUNNEL, jamais par la route
+  # par défaut. Sans cette liaison, le ping suit la table de routage — et si
+  # la route vers $CIBLE ne pique pas (encore) sur $IFACE, il part au dehors,
+  # où N'IMPORTE QUI peut porter cette adresse : 10.100.0.0/24 est une plage
+  # privée banale. Mesuré sur le kit A0003 le 18/08/2026, dont l'accès passe
+  # par un fournisseur VPN qui utilise la même plage en interne :
+  #     ping -I wg0   10.100.0.1 → 0/3   (verdict juste : le tunnel est mort)
+  #     ping -I wlan0 10.100.0.1 → 3/3 en 304 ms  (un routeur ÉTRANGER répond)
+  # La fenêtre est étroite mais muette : $IFACE présente (la garde ci-dessus
+  # passe) et route absente → le `elif` matche, le watchdog ne journalise
+  # RIEN et ne bascule PAS. Faux vert ET silence, le pire cas d'exploitation.
+  # SO_BINDTODEVICE force la sortie sur l'interface quelle que soit la table,
+  # donc la sonde échoue franc au lieu de se laisser tromper (fail-closed).
+  # Le corpus l'affirmait déjà : annexe 2 l.1043 « ping du watchdog | netns
+  # hôte (OUTPUT) → wg0 ». Ce correctif rend le code conforme au texte.
+  elif ping -I "$IFACE" -c3 -W2 -w10 "$CIBLE" >/dev/null 2>&1; then
     : # le chemin COMPLET répond : rien à faire, et surtout rien à écrire
   else
     journal "$CIBLE muet — le chemin complet est rompu"

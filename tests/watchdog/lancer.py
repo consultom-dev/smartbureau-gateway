@@ -72,6 +72,15 @@ exit 0
 
 DOUBLURE_PING = """#!/bin/sh
 echo "ping $*" >> "$BANC_JOURNAL"
+# L'IMPOSTEUR (W-13) : un répondant ÉTRANGER porte la cible sur la route par
+# défaut, tandis que le tunnel est mort. Il répond donc au ping NU et reste
+# muet au ping LIÉ à l'interface. Une sonde qui ne se lie pas se fait duper.
+if [ -f "$BANC_IMPOSTEUR" ]; then
+  case "$*" in
+    *-I*) exit 1 ;;   # sorti par le tunnel : personne, le tunnel est mort
+    *)    exit 0 ;;   # sorti au dehors : l'imposteur répond
+  esac
+fi
 [ -f "$BANC_MUET" ] && exit 1
 exit 0
 """
@@ -98,7 +107,8 @@ class Banc:
 
     def sable(self, nom, endpoints=("203.0.113.10", "198.51.100.7", "192.0.2.30"),
               port="51820", peer="CLE-PARTAGEE-DES-PASSERELLES=",
-              endpoint_courant="203.0.113.10:51820", wg0=True, muet=False):
+              endpoint_courant="203.0.113.10:51820", wg0=True, muet=False,
+              imposteur=False):
         base = os.path.join(self.racine, nom)
         controle = os.path.join(base, "controle")
         os.makedirs(controle, exist_ok=True)
@@ -115,6 +125,8 @@ class Banc:
             open(os.path.join(base, "wg0"), "w").close()
         if muet:
             open(os.path.join(base, "muet"), "w").close()
+        if imposteur:
+            open(os.path.join(base, "imposteur"), "w").close()
         return base, controle
 
     @staticmethod
@@ -143,6 +155,7 @@ class Banc:
             "BANC_HANDSHAKE": os.path.join(base, "handshake"),
             "BANC_WG0": os.path.join(base, "wg0"),
             "BANC_MUET": os.path.join(base, "muet"),
+            "BANC_IMPOSTEUR": os.path.join(base, "imposteur"),
             "BANC_PORT_APRES": os.path.join(base, "port-apres"),
             "BANC_PEER_APRES": os.path.join(base, "peer-apres"),
         })
@@ -229,7 +242,7 @@ if MOTIF:
                 "W-04 port relu", "W-05 clé du peer", "W-06 bascule ≤ 60 s",
                 "W-07 agent d'enrôlement mort", "W-08 liste absente",
                 "W-09 interface absente", "W-10 marqueurs", "W-11 marqueurs prudents",
-                "W-12 agent d'enrôlement tué"]:
+                "W-12 agent d'enrôlement tué", "W-13 imposteur sur la cible"]:
         r.cas(nom, "annexe 2 §3.4")
         r.sauter(nom, MOTIF)
     sortir(r)
@@ -345,8 +358,10 @@ try:
           "plan §4, critère de fini 3 ; annexe 2 §3.4")
     r.verifier("WATCHDOG_PERIODE_S:-30" in lire_source,
                "la période par défaut est 30 s (corpus)")
-    r.verifier("ping -c3 -W2" in lire_source,
-               "le ping est borné : -c3 -W2, soit 6 s au pire")
+    r.verifier('ping -I "$IFACE" -c3 -W2' in lire_source,
+               "le ping est borné : -c3 -W2, soit 6 s au pire — et lié au "
+               "tunnel, la borne ne dispense pas de sortir par le bon chemin "
+               "(W-13 l'éprouve en comportement)")
     base, controle = banc.sable("w06", muet=True)
     acheve, duree = banc.watchdog(base, controle, tours=1, periode=1)
     r.verifier(banc.lire(base, "endpoint") == "198.51.100.7:51820",
@@ -510,6 +525,29 @@ try:
                    "d'aucun processus (invariant 5)",
                    banc.lire(base, "endpoint") + " " + acheve.stderr.decode()[-200:])
     r.fin("W-12 agent d'enrôlement tué")
+
+    # =========================================================================
+    # Ce cas ne vérifie pas la FORME de la commande — il met un IMPOSTEUR en
+    # face et exige que la sonde le refuse. Un test qui lirait « la commande
+    # porte -I » attesterait de ce que le producteur écrit, jamais de ce que
+    # la sonde fait : c'est la classe de défaut trouvée le 18/08/2026 (un
+    # contrôle vert pour une raison étrangère à ce qu'il prétend mesurer).
+    # Question de contrôle : QUI D'AUTRE POURRAIT RENDRE CE CONTRÔLE VERT ?
+    r.cas("W-13 — un répondant étranger porte la cible : la sonde n'est pas dupée",
+          "annexe 2 §3.4 et l.1043 ; arch. §12")
+    base, controle = banc.sable("w13", imposteur=True)
+    acheve, _ = banc.watchdog(base, controle, tours=1)
+    appels = banc.appels(base)
+    pings = [a for a in appels if a.startswith("ping")]
+    r.verifier(any(" -I " in p for p in pings),
+               "la sonde sort PAR LE TUNNEL (-I), pas par la route par défaut",
+               " | ".join(pings))
+    r.verifier(banc.lire(base, "endpoint") == "198.51.100.7:51820",
+               "et le chemin rompu est VU : bascule malgré l'imposteur "
+               "(sans la liaison, le ping nu recevrait 3/3 et le watchdog "
+               "se tairait — faux vert ET silence)",
+               banc.lire(base, "endpoint") + " " + acheve.stderr.decode()[-200:])
+    r.fin("W-13 imposteur sur la cible")
 
 finally:
     banc.arreter()
